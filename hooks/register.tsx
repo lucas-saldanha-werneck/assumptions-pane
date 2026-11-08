@@ -165,7 +165,8 @@ export const register: Register = on => {
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const table = $.ui.resolve(e)
     const { Box, Text, Button } = table
-    // The mobile app draws no text field yet.
+    // A surface table without Input falls back to a hint. (A mobile app that does not draw
+    // Input gets an empty Box instead, which a hook cannot detect.)
     const Input = 'Input' in table ? table.Input : undefined
     const list = await read($, items)
     const expanded = await read($, isExpanded)

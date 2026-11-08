@@ -1,30 +1,27 @@
 # assumptions-pane
 
-A Claude Code mod that keeps a side pane of the assumptions Claude makes while it works. Each time
-Claude picks something you did not state (a default value, a file name, one option over another),
-it logs it in one line and keeps going. You mark each one Right or Wrong, type a change if needed,
-and send the answers back in one message.
+A Claude Code mod that lists the assumptions Claude makes while it works in a side pane, so you can
+mark each one right or wrong and send corrections in one message. Claude does not stop to ask, and
+it does not guess silently either.
+
+Each time Claude picks something you did not state (a default value, a file name, one option over
+another), it logs it in one line and keeps working. This sketch shows roughly how the pane looks in
+a terminal after you press Show. It is not a screenshot:
 
 ```
 Assumptions (2 open)
-2 assumptions, 2 open  [Hide]
+2 assumptions, 2 open  Hide
 ? A1 The table sorts by date, newest first
   why: most recent entries matter most
-  [Right] [Wrong] [Change…]
+  [ Right ] [ Wrong ] Change…
 ? A2 Prices are shown in USD
-  [Right] [Wrong] [Change…]
-[Nothing to send] [All open are right]
+  [ Right ] [ Wrong ] Change…
+[ Nothing to send ] All open are right
 ```
-
-## Why
-
-Claude has two bad options when a request leaves something open: stop and ask (slow), or guess
-silently (you find out later). With this mod it guesses out loud, and you review the guesses when
-it suits you, without interrupting the turn.
 
 ## What Claude sees
 
-A section added to the system prompt tells Claude when to use the tool:
+The mod adds this section to the system prompt:
 
 > Assumptions pane: while you build or change something, each time you make an assumption the
 > person did not state (a default value, a guess about what they want, a choice between options, a
@@ -33,7 +30,7 @@ A section added to the system prompt tells Claude when to use the tool:
 > side pane and sends corrections. When a message starts with "Assumption review", apply each
 > correction it lists before you go on.
 
-The tool call and its result:
+A tool call and its result:
 
 ```
 log_assumption({ "assumption": "The table sorts by date, newest first", "why": "most recent entries matter most" })
@@ -48,55 +45,55 @@ Assumption review:
 - A2 RIGHT: Prices are shown in USD
 ```
 
-If you type a normal prompt instead, any answers not sent yet ride along with it, so none are
-lost. If Claude is mid-turn, the review waits until the turn ends; if it is not delivered, your
-answers stay in the pane.
+An item marked Wrong with no change typed is sent as
+`- A1 WRONG: <text> (do not keep this; ask me if the right choice is not clear)`.
 
 ## Install
 
 At the prompt of a terminal Claude Code session:
 
 ```
+/plugin install assumptions-pane --marketplace lucas-saldanha-werneck/assumptions-pane
+```
+
+Or from a shell:
+
+```
+claude plugin install assumptions-pane --marketplace lucas-saldanha-werneck/assumptions-pane
+```
+
+You can also add the marketplace first and then install:
+
+```
 /plugin marketplace add lucas-saldanha-werneck/assumptions-pane
 /plugin install assumptions-pane@assumptions-pane
 ```
 
-From a shell: `claude plugin install assumptions-pane --marketplace lucas-saldanha-werneck/assumptions-pane`.
-
-In the desktop app, where `/plugin` does not run: click + next to the prompt box, then Plugins,
-Add marketplace with `lucas-saldanha-werneck/assumptions-pane`, then Add plugin.
+`/plugin` does not run in the desktop app. Install from a terminal with the user scope, and the mod
+also loads in the desktop app's local Code sessions.
 
 ## Use
 
-- The pane opens by itself when Claude logs the first assumption (in a terminal, only when the
-  window is wide enough to dock it; otherwise it waits).
+- The pane opens by itself when Claude logs the first assumption. It starts collapsed: press Show
+  to see the list. In a terminal it only opens by itself when the window is at least 144 columns
+  wide (110 if you have opened the pane before). Below that it waits.
 - `/assumptions` opens the pane at any width. `/assumptions clear` empties the list.
+- Right and Wrong mark an item. Change… opens a text field for the fix. All open are right marks
+  every open item at once.
+- Send hands your answers to Claude. If Claude is mid-turn, the review waits until the turn ends.
+  If it is not delivered, your answers stay in the pane.
+- If you type a normal prompt instead, any answers not sent yet go along with it.
+- Answered items leave the list once Claude has them. Open items stay.
 - Numbers keep counting after a clear, so "A3" always means one item.
 
-## Where it works
+There are no settings and nothing else to install.
 
-Checked against the mod API reference bundled with Claude Code 2.1.319 and the tests in this repo:
+## How it works
 
-- **Terminal:** yes (the tests draw the pane on the `terminal` surface).
-- **Desktop app (Code tab, local session):** yes, when installed at user scope (the tests draw it
-  on the `desktop` surface too).
-- **Mobile app:** the pane draws, but the mobile app has no text field yet, so Change… asks you to
-  type the change in the prompt box. Not tested on a phone.
-
-## Settings
-
-None.
-
-## Optional requirements
-
-None. It needs a Claude Code version with mods (hooks modules); it was built and tested on 2.1.319.
-
-## Test
-
-```
-claude plugin test .
-claude plugin validate .
-```
+The mod is one hooks module (`hooks/register.tsx`). At session start it registers the
+`log_assumption` tool and the `/assumptions` command. A `prompt.compose` hook adds the system prompt
+section above. Each tool call stores the item in session state and opens the pane. Send submits the
+review as a prompt from the mod. A `prompt.submit` hook adds unsent answers to a prompt you type.
 
 ## Uninstall
 
@@ -105,8 +102,20 @@ claude plugin validate .
 /plugin marketplace remove assumptions-pane
 ```
 
+From a shell, the same commands work with `claude plugin` in place of `/plugin`.
+
+## Limits and what was not tested
+
+- Built and tested on Claude Code 2.1.319. It needs a version with mods (hooks modules).
+- The tests draw the pane on the `terminal` and `desktop` surfaces. Nobody has tried it by hand in the
+  desktop app.
+- Not tested on the mobile app. A mobile app that does not draw text fields shows nothing for
+  Change…, and the mod cannot tell. Use Right or Wrong there and type the fix in the prompt box.
+- The list keeps the last 100 items. An assumption is cut at 400 characters and its reason at 200.
+- Tests: `claude plugin test .` and `claude plugin validate .`.
+
 ## License
 
-MIT.
+MIT. See `LICENSE`.
 
 Built with Claude Code
