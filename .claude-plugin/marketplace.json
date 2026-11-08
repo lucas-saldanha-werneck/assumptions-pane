@@ -1,0 +1,15 @@
+{
+  "name": "assumptions-pane",
+  "description": "A side pane where Claude logs the assumptions it makes, for you to confirm or correct.",
+  "owner": {
+    "name": "Lucas Saldanha Werneck",
+    "url": "https://github.com/lucas-saldanha-werneck"
+  },
+  "plugins": [
+    {
+      "name": "assumptions-pane",
+      "source": "./",
+      "description": "A side pane that lists the assumptions Claude makes while it builds, so you can mark each one right or wrong and send corrections."
+    }
+  ]
+}

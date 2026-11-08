@@ -1,0 +1,14 @@
+{
+  "name": "assumptions-pane",
+  "version": "0.1.0",
+  "description": "A side pane that lists the assumptions Claude makes while it builds, so you can mark each one right or wrong and send corrections.",
+  "author": {
+    "name": "Lucas Saldanha Werneck",
+    "url": "https://github.com/lucas-saldanha-werneck"
+  },
+  "homepage": "https://github.com/lucas-saldanha-werneck/assumptions-pane",
+  "repository": "https://github.com/lucas-saldanha-werneck/assumptions-pane",
+  "license": "MIT",
+  "keywords": ["mod", "pane", "assumptions", "review"],
+  "types": "./types/index.d.ts"
+}
