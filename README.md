@@ -82,8 +82,10 @@ also loads in the desktop app's local Code sessions.
   every open item at once.
 - Send hands your answers to Claude. If Claude is mid-turn, the review waits until the turn ends.
   If it is not delivered, your answers stay in the pane.
-- If you type a normal prompt instead, any answers not sent yet go along with it.
-- Answered items leave the list once Claude has them. Open items stay.
+- If you type a normal prompt instead, any answers not sent yet go along with it. If that prompt
+  is blocked and does not reach Claude, your answers stay in the pane.
+- Answered items leave the list once Claude has them. Open items stay. If you change an answer
+  while the review waits, the new answer stays in the pane so you can send it.
 - Numbers keep counting after a clear, so "A3" always means one item.
 
 There are no settings and nothing else to install.

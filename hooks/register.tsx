@@ -54,11 +54,21 @@ const reviewText = (list: Assumption[]): string => {
   return ['Assumption review:', ...lines].join('\n')
 }
 
-// Answered items leave the list once Claude has them; open ones stay.
-const markSent = async ($: EngineInterface, ids: string[]): Promise<void> => {
-  await update($, items, list => list.filter(a => !ids.includes(a.id)))
+// Answered items leave the list once Claude has them; open ones stay. Only the
+// answer Claude got leaves: a row changed after it was sent stays, to send again.
+const sameAnswer = (a: Assumption, b: Assumption): boolean =>
+  a.verdict === b.verdict && (a.correction ?? '') === (b.correction ?? '')
+
+const markSent = async ($: EngineInterface, delivered: Assumption[]): Promise<void> => {
+  const isDelivered = (a: Assumption) => delivered.some(d => d.id === a.id && sameAnswer(a, d))
+  const ids = (await read($, items)).filter(isDelivered).map(a => a.id)
+  await update($, items, list => list.filter(a => !isDelivered(a)))
   await update($, editing, v => (v !== null && ids.includes(v) ? null : v))
-  await openPane($)
+  try {
+    await openPane($)
+  } catch {
+    // The answers were delivered; a pane that fails to redraw changes nothing.
+  }
 }
 
 // A plugin's prompt only enters once the session is idle, so while Claude is
@@ -75,20 +85,21 @@ const sendNow = async ($: EngineInterface): Promise<void> => {
   await openPane($)
   $.ui.toast('Review queued. Claude reads it as soon as its current turn ends.')
   const unqueue = () => update($, queued, q => q.filter(id => !ids.includes(id)))
+  let result: Awaited<ReturnType<typeof $.prompt.submit>> | undefined
   try {
-    const result = await $.prompt.submit({ text: reviewText(list) })
-    await unqueue()
-    if (result.drop !== undefined) {
-      await openPane($)
-      $.ui.toast('Review not delivered. Your answers are still in the pane: press Send again or type a message.')
-      return
-    }
-    await markSent($, ids)
+    result = await $.prompt.submit({ text: reviewText(list) })
   } catch {
+    result = undefined
+  }
+  if (result !== undefined && result.drop === undefined) {
+    await markSent($, list)
     await unqueue()
     await openPane($)
-    $.ui.toast('Review not delivered. Your answers are still in the pane: press Send again or type a message.')
+    return
   }
+  await unqueue()
+  await openPane($)
+  $.ui.toast('Review not delivered. Your answers are still in the pane: press Send again or type a message.')
 }
 
 export const register: Register = on => {
@@ -140,14 +151,22 @@ export const register: Register = on => {
     return { result: `Logged as ${id}. Keep working; the person may correct it later.` }
   }).catch(($, e, next) => next(e))
 
-  // A typed prompt carries any answers not sent yet, so none are lost.
+  // A typed prompt carries any answers not sent yet. They leave the pane only
+  // once the prompt has entered; if it is dropped or fails, they stay.
   on('prompt.submit', async ($, e, next) => {
     if (e.origin?.kind === 'plugin') return next(e)
     const waitingIds = await read($, queued)
     const list = unsent(await read($, items)).filter(a => !waitingIds.includes(a.id))
     if (list.length === 0) return next(e)
-    await markSent($, list.map(a => a.id))
-    return next({ ...e, context: [...(e.context ?? []), reviewText(list)] })
+    const ids = list.map(a => a.id)
+    await update($, queued, q => [...q, ...ids])
+    try {
+      const result = await next({ ...e, context: [...(e.context ?? []), reviewText(list)] })
+      if (result.drop === undefined) await markSent($, list)
+      return result
+    } finally {
+      await update($, queued, q => q.filter(id => !ids.includes(id)))
+    }
   }).catch(($, e, next) => next(e))
 
   on('command.run', { command: 'assumptions' }, async ($, e) => {
