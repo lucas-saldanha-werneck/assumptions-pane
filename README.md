@@ -118,6 +118,10 @@ From a shell, the same commands work with `claude plugin` in place of `/plugin`.
   until you send. An assumption is cut at 400 characters and its reason at 200.
 - Tests: `claude plugin test .` and `claude plugin validate .`.
 
+## Credits
+
+The idea comes from the "Assumption Checker" mod in the AI LABS video [Claude Mods Are Insane... You Need To Try These Right Now](https://www.youtube.com/watch?v=ERNqRK6sMJY&t=399) (06:39, 9 Oct 2026). This code was written separately with Claude Code.
+
 ## License
 
 MIT. See `LICENSE`.
