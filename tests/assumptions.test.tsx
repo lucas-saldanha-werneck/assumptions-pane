@@ -142,3 +142,56 @@ test('an edit made while a review waits is kept after the review enters', async 
   expect(await ui.find({ key: 'right-A1' })).toBeUndefined()
   await ui.unmount()
 })
+
+test('a pane that fails to open during Send does not strand the answers', async ($, on) => {
+  let paneBroken = false
+  on('ui.open', async () => {
+    if (paneBroken) throw new Error('pane failed')
+    return { value: { isPlaced: true as const } }
+  })
+  on('ui.toast', async () => ({ value: undefined }))
+  const seen: string[] = []
+  on('prompt.submit', async (_$, e) => {
+    seen.push([e.text, ...(e.context ?? [])].join('\n'))
+    return { text: e.text, context: e.context }
+  })
+  await logAssumption($, 'Use port 8080')
+  const ui = await $.ui.mount({ plugin: 'assumptions-pane', surface: 'terminal', ...PANE })
+  await ui.press({ key: 'toggle' })
+  await ui.press({ key: 'wrong-A1' })
+  paneBroken = true
+  await ui.press({ key: 'send' }).catch(() => undefined)
+  paneBroken = false
+  // The answer is not stuck as "waiting": the review went out, or a typed prompt still carries it.
+  await $.prompt.submit(TYPED)
+  expect(seen.join('\n')).toContain('A1 WRONG: Use port 8080')
+  await ui.unmount()
+})
+
+test('assumptions logged at the same time get different numbers', async ($, on) => {
+  on('ui.open', async () => ({ value: { isPlaced: true as const } }))
+  const results = await Promise.all([
+    logAssumption($, 'First'),
+    logAssumption($, 'Second'),
+    logAssumption($, 'Third'),
+  ])
+  const ids = results.map(r => JSON.stringify(r).match(/A\d+/)?.[0])
+  expect(new Set(ids).size).toBe(3)
+})
+
+test('the 100-item cap never drops an answer that was not sent', async ($, on) => {
+  on('ui.open', async () => ({ value: { isPlaced: true as const } }))
+  const sent: string[] = []
+  on('prompt.submit', async (_$, e) => {
+    sent.push(e.text)
+    return { text: e.text }
+  })
+  await logAssumption($, 'Use port 8080')
+  const ui = await $.ui.mount({ plugin: 'assumptions-pane', surface: 'terminal', ...PANE })
+  await ui.press({ key: 'toggle' })
+  await ui.press({ key: 'wrong-A1' })
+  for (let i = 0; i < 105; i++) await logAssumption($, `Filler ${i}`)
+  await ui.press({ key: 'send' })
+  expect(sent.at(-1)).toContain('A1 WRONG: Use port 8080')
+  await ui.unmount()
+})

@@ -35,6 +35,15 @@ const openPane = async ($: EngineInterface, focus = false): Promise<void> => {
   await $.ui.open({ id: PANE, title: titleFor(list), columns: 46, ...(focus ? { focus: true as const } : {}) })
 }
 
+// Redraws the pane; a pane that fails to open never blocks the answers.
+const redraw = async ($: EngineInterface): Promise<void> => {
+  try {
+    await openPane($)
+  } catch {
+    // Nothing to do: the list itself is unchanged.
+  }
+}
+
 const setOne = async ($: EngineInterface, id: string, patch: Partial<Assumption>): Promise<void> => {
   await update($, items, list => list.map(a => (a.id === id ? { ...a, ...patch, isSent: false } : a)))
   await openPane($)
@@ -64,11 +73,7 @@ const markSent = async ($: EngineInterface, delivered: Assumption[]): Promise<vo
   const ids = (await read($, items)).filter(isDelivered).map(a => a.id)
   await update($, items, list => list.filter(a => !isDelivered(a)))
   await update($, editing, v => (v !== null && ids.includes(v) ? null : v))
-  try {
-    await openPane($)
-  } catch {
-    // The answers were delivered; a pane that fails to redraw changes nothing.
-  }
+  await redraw($)
 }
 
 // A plugin's prompt only enters once the session is idle, so while Claude is
@@ -81,25 +86,42 @@ const sendNow = async ($: EngineInterface): Promise<void> => {
   if (list.length === 0) return
   const ids = list.map(a => a.id)
   await update($, queued, q => [...q, ...ids])
-  await update($, editing, () => null)
-  await openPane($)
-  $.ui.toast('Review queued. Claude reads it as soon as its current turn ends.')
-  const unqueue = () => update($, queued, q => q.filter(id => !ids.includes(id)))
-  let result: Awaited<ReturnType<typeof $.prompt.submit>> | undefined
+  // Whatever happens below, the ids leave the queue again, so no answer is stuck as "waiting".
+  let delivered = false
   try {
-    result = await $.prompt.submit({ text: reviewText(list) })
-  } catch {
-    result = undefined
+    await update($, editing, () => null)
+    await redraw($)
+    $.ui.toast('Review queued. Claude reads it as soon as its current turn ends.')
+    let result: Awaited<ReturnType<typeof $.prompt.submit>> | undefined
+    try {
+      result = await $.prompt.submit({ text: reviewText(list) })
+    } catch {
+      result = undefined
+    }
+    delivered = result !== undefined && result.drop === undefined
+    if (delivered) await markSent($, list)
+  } finally {
+    await update($, queued, q => q.filter(id => !ids.includes(id)))
+    await redraw($)
   }
-  if (result !== undefined && result.drop === undefined) {
-    await markSent($, list)
-    await unqueue()
-    await openPane($)
-    return
+  if (!delivered) {
+    $.ui.toast('Review not delivered. Your answers are still in the pane: press Send again or type a message.')
   }
-  await unqueue()
-  await openPane($)
-  $.ui.toast('Review not delivered. Your answers are still in the pane: press Send again or type a message.')
+}
+
+// The list keeps at most this many items. Answers not sent yet never count
+// against it: only the oldest items with nothing to send leave.
+const MAX_ITEMS = 100
+const capped = (list: Assumption[]): Assumption[] => {
+  let excess = list.length - MAX_ITEMS
+  if (excess <= 0) return list
+  return list.filter(a => {
+    if (excess > 0 && unsent([a]).length === 0) {
+      excess--
+      return false
+    }
+    return true
+  })
 }
 
 export const register: Register = on => {
@@ -141,11 +163,11 @@ export const register: Register = on => {
     const text = String(input.assumption ?? '').trim().slice(0, 400)
     if (text === '') return { deny: 'log_assumption needs the assumption text.' }
     const why = String(input.why ?? '').trim().slice(0, 200)
-    const id = `A${await read($, nextId)}`
-    await update($, nextId, n => n + 1)
+    // update() writes atomically and resolves what it wrote, so two calls at once get two numbers.
+    const id = `A${(await update($, nextId, n => n + 1)) - 1}`
     await update($, items, list => {
       const one: Assumption = { id, text, verdict: 'open', isSent: false, ...(why !== '' ? { why } : {}) }
-      return [...list, one].slice(-100)
+      return capped([...list, one])
     })
     await openPane($)
     return { result: `Logged as ${id}. Keep working; the person may correct it later.` }

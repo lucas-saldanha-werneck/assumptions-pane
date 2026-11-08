@@ -113,7 +113,9 @@ From a shell, the same commands work with `claude plugin` in place of `/plugin`.
   desktop app.
 - Not tested on the mobile app. A mobile app that does not draw text fields shows nothing for
   Change…, and the mod cannot tell. Use Right or Wrong there and type the fix in the prompt box.
-- The list keeps the last 100 items. An assumption is cut at 400 characters and its reason at 200.
+- The list keeps about 100 items. When it is full, the oldest items with nothing to send leave
+  first. An answer you have not sent yet never leaves to make room, so the list can grow past 100
+  until you send. An assumption is cut at 400 characters and its reason at 200.
 - Tests: `claude plugin test .` and `claude plugin validate .`.
 
 ## License
