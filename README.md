@@ -159,9 +159,12 @@ review's rows once its turn starts. Every save re-reads the store and merges by 
 whether side-stack's `/stack` command is listed to decide whether to draw its own pane or a part of
 side-stack's pane (a `ui.render` hook on the `side-stack` pane that always draws the parts beneath it
 too), checking again at session start, 0.1 s and 1.1 s later, and on every new item and command.
-A `/clear` goes on under a new session id with no session start, so the mod keeps the id it loaded
-under and, when a prompt, turn, command, tool call or drawing shows a different id, loads the list
-from the store again, checks side-stack again and republishes its `stacked` value.
+A `/clear` goes on under a new session id with fresh state and no session start, so the mod keeps
+the id it loaded under. A watch started at session start (every 1.5 s), and every prompt, turn,
+command, tool call or button press, loads the list from the store again when the id differs,
+checks side-stack again and republishes its `stacked` value; until then a drawing shows the list as
+the store holds it. (A drawing cannot reload it itself: Claude Code refuses state writes made while
+drawing, including from a timer the drawing starts.)
 
 ## Uninstall
 
@@ -183,8 +186,9 @@ From a shell, the same commands work with `claude plugin` in place of `/plugin`.
 - `/clear` is tested in the test kit the way the docs describe it: the session ends with reason
   `clear`, the session id changes and no new session start follows. The kit cannot wipe a plugin's
   state, so "fresh state" is tested as a new session id with no session start and the list only in
-  the store. The v0.2.0 failure (own tab, "No assumptions yet" after a real `/clear`) was seen by
-  hand; this fix has not been tried by hand yet. A folder that was emptied keeps a small
+  the store. A real `/clear` was also tried by hand in a terminal (Claude Code 2.1.319, with
+  side-stack, idea-shelf, plan-checklist and clean-view): the list stays in the Stack pane, comes
+  back into the new session and numbering goes on. Not tried by hand in the desktop app. A folder that was emptied keeps a small
   record (its next number and the time of the clear) in the store so numbers go on and an old
   session cannot bring cleared items back.
 - Not tested on the mobile app. A mobile app that does not draw text fields shows nothing for
