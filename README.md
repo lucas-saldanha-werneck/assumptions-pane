@@ -79,7 +79,9 @@ also loads in the desktop app's local Code sessions.
   wide (110 if you have opened the pane before). Below that it waits.
 - `/assumptions` opens the pane at any width. `/assumptions clear` empties the list.
 - The list is saved per folder. A new session started in the same folder (for example after a
-  reload of the app) loads it. After `/clear` the list stays. Each folder has its own list.
+  reload of the app) loads it. After `/clear` (which starts a new session id with fresh state) the
+  mod loads the saved list again; the pane shows it from the store even before the next prompt.
+  Each folder has its own list.
 - Two sessions open in the same folder share the list: each save merges with what the other
   session saved, so neither wipes the other's items or answers, and numbers are not handed out
   twice.
@@ -112,7 +114,8 @@ one of these panes (assumptions-pane, idea-shelf, plan-checklist), the
 
 - **Alone** (side-stack not installed): the mod works as described above, in its own
   "Assumptions" pane.
-- side-stack counts as running only when it has said so and its `/stack` command is there. If
+- side-stack counts as running when its `/stack` command is listed. (side-stack's own "present"
+  value lasts one session and is gone after `/clear`, so the mod does not rely on it.) If
   side-stack goes away mid-session, the next new assumption or `/assumptions` brings the own pane
   back.
 - **With side-stack**: the mod does not open its own pane. Its part shows inside the Stack pane,
@@ -150,9 +153,12 @@ under `assumptions:<folder>`, and opens the pane. Send submits the review as a p
 A `prompt.submit` hook adds unsent answers to a prompt you type, and a `turn.start` hook removes a
 review's rows once its turn starts. Every save re-reads the store and merges by item id first
 (newer change wins, the higher next number wins, sent or cleared items stay out). It reads
-side-stack's `present` value and command list to decide whether to draw its own pane or a part of
+whether side-stack's `/stack` command is listed to decide whether to draw its own pane or a part of
 side-stack's pane (a `ui.render` hook on the `side-stack` pane that always draws the parts beneath it
 too), checking again at session start, 0.1 s and 1.1 s later, and on every new item and command.
+A `/clear` goes on under a new session id with no session start, so the mod keeps the id it loaded
+under and, when a prompt, turn, command, tool call or drawing shows a different id, loads the list
+from the store again, checks side-stack again and republishes its `stacked` value.
 
 ## Uninstall
 
@@ -171,8 +177,11 @@ From a shell, the same commands work with `claude plugin` in place of `/plugin`.
 - The side-stack mode is tested with a stand-in for side-stack in the tests, not with the released
   side-stack mod. Bringing the Stack pane back after you close it depends on Claude Code passing
   side-stack's pane close to this mod's hooks, which the test kit cannot show.
-- `/clear` is tested the way the docs describe it (the session ends with reason `clear` and no new
-  session start follows), in the test kit, not by hand. A folder that was emptied keeps a small
+- `/clear` is tested in the test kit the way the docs describe it: the session ends with reason
+  `clear`, the session id changes and no new session start follows. The kit cannot wipe a plugin's
+  state, so "fresh state" is tested as a new session id with no session start and the list only in
+  the store. The v0.2.0 failure (own tab, "No assumptions yet" after a real `/clear`) was seen by
+  hand; this fix has not been tried by hand yet. A folder that was emptied keeps a small
   record (its next number and the time of the clear) in the store so numbers go on and an old
   session cannot bring cleared items back.
 - Not tested on the mobile app. A mobile app that does not draw text fields shows nothing for

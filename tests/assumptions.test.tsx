@@ -214,6 +214,7 @@ type World = {
   stackRuns: number
   host: { present: boolean; command: boolean }
   clock: ReturnType<typeof mock.clock>
+  session: { id: string }
 }
 
 /** The world beneath the plugin, with a store the test can read (mock.store
@@ -229,6 +230,8 @@ async function boot(
     ownPaneUp?: boolean
     submit?: 'enter' | 'hang'
     storeBroken?: boolean
+    /** false: no session.start under this session id (fresh state, as after a /clear). */
+    start?: boolean
   } = {},
 ): Promise<World> {
   const world: World = {
@@ -241,7 +244,10 @@ async function boot(
     stackRuns: 0,
     host: { present: options.host ?? false, command: options.hostCommand ?? options.host ?? false },
     clock: mock.clock(on, { now: 1_000_000 }),
+    session: { id: 's1' },
   }
+  on('session.id', () => ({ value: world.session.id }) as never)
+  on('session.cwd', () => ({ value: '/tmp' }) as never)
   let ownPaneUp = options.ownPaneUp ?? false
   on('store.get', (_$, e) => ({ value: world.kept[(e as { key: string }).key] }) as never)
   on('store.set', (_$, e) => {
@@ -251,8 +257,9 @@ async function boot(
     world.sets.push({ key: one.key, value: world.kept[one.key] })
     return { value: undefined } as never
   })
-  // Stands for the side-stack plugin's value and its command.
-  on('state.get', { plugin: 'side-stack', key: 'present' }, () => ({ value: { value: world.host.present, version: 1 } }) as never)
+  // Stands for side-stack's /stack command. (Its `present` state value is per
+  // session and gone after a /clear, so the mod does not read it; host.present
+  // only records what side-stack would say.)
   on('command.list', () =>
     ({
       value: [
@@ -291,7 +298,7 @@ async function boot(
     if (options.submit === 'hang') return new Promise(() => undefined) as never
     return { text: e.text }
   })
-  await $.session.start({ cwd: '/tmp', surface: 'terminal', isInteractive: true })
+  if (options.start !== false) await $.session.start({ cwd: '/tmp', surface: 'terminal', isInteractive: true })
   return world
 }
 
@@ -533,7 +540,7 @@ test('a store that cannot be written is said once, and the list still works', as
   await ui.unmount()
 })
 
-test('a stale side-stack flag without its /stack command counts as absent', async ($, on) => {
+test('a side-stack flag without its /stack command counts as absent', async ($, on) => {
   sectionBeneath(on)
   const world = await boot($, on, { host: true, hostCommand: false })
   await logAssumption($, 'Sort by date')
@@ -574,4 +581,90 @@ test('side-stack going away brings the own pane back on the next assumption', as
   world.host.command = false
   await logAssumption($, 'Second')
   expect(world.opened).toContain('assumptions')
+})
+
+// v3: what a real /clear does, per the docs (SessionEndInput): the session ends
+// with reason "clear", the process goes on under a NEW session id, no
+// session.start fires, and session state (this plugin's and side-stack's
+// `present`) does not carry over. The test kit cannot wipe a plugin's state
+// (the test's $ has no $.state, and a test-held state stops redraws), so it is
+// shown in two halves: A, the sequence itself; B, what the plugin meets after
+// it, fresh state under a new id with no session.start and the list only in
+// the store.
+for (const surface of SURFACES) {
+  test(`A: after the /clear sequence the list is in the stack, not in an own pane (${surface})`, async ($, on) => {
+    sectionBeneath(on)
+    const world = await boot($, on, { host: true })
+    await logAssumption($, 'teste')
+    await $.session.end({ reason: 'clear', sessionId: 's1', resume: { id: 's1' } } as never)
+    world.session.id = 's2'
+    world.host.present = false
+    // Another session saved one more meanwhile: the reload under s2 brings it in.
+    world.kept['assumptions:/tmp'] = { items: [one('A1', 'teste'), one('A2', 'outra', 'open', { at: 2_000_000 })], nextId: 3 }
+    await $.prompt.submit(TYPED)
+    await $.turn.start({ turnId: 't2', text: 'go on' })
+    expect(world.opened).not.toContain('assumptions')
+    const ui = await $.ui.mount({ ...STACK, surface })
+    await ui.press({ plugin: AP, key: 'as-toggle' })
+    const texts = (await ui.findAll({ type: 'Text' })).map(t => t.text)
+    expect(texts[0]).toBe('Assumptions')
+    expect(texts.join('|')).toContain('A1 teste')
+    expect(texts.join('|')).toContain('A2 outra')
+    expect(texts.at(-1)).toBe('NEXT-SECTION')
+    await ui.unmount()
+    expect(JSON.stringify(await logAssumption($, 'depois'))).toContain('A3')
+  })
+
+  test(`B: fresh state under a new id, no session.start: the saved list is back, in the stack (${surface})`, async ($, on) => {
+    sectionBeneath(on)
+    const stored = { 'assumptions:/tmp': { items: [one('A1', 'teste')], nextId: 2 } }
+    const world = await boot($, on, { stored, host: false, hostCommand: true, start: false })
+    world.session.id = 's2-fresh'
+    // Before any prompt, the drawing reads the store.
+    const early = await $.ui.mount({ ...STACK, surface })
+    const earlyTexts = (await early.findAll({ type: 'Text' })).map(t => t.text)
+    expect(earlyTexts[0]).toBe('Assumptions')
+    expect(earlyTexts).toContain('1, 1 open')
+    expect(earlyTexts.at(-1)).toBe('NEXT-SECTION')
+    await early.unmount()
+    // A prompt and its turn load it into state; buttons and review work.
+    await $.prompt.submit(TYPED)
+    await $.turn.start({ turnId: 't2', text: 'go on' })
+    expect(world.opened).not.toContain('assumptions')
+    const ui = await $.ui.mount({ ...STACK, surface })
+    await ui.press({ plugin: AP, key: 'as-toggle' })
+    expect(await ui.find({ type: 'Text', text: /A1 teste/ })).toBeDefined()
+    await ui.press({ plugin: AP, key: 'as-wrong-A1' })
+    await ui.press({ plugin: AP, key: 'as-send' })
+    expect(world.sent.at(-1)).toContain('A1 WRONG: teste')
+    await ui.unmount()
+    expect(JSON.stringify(await logAssumption($, 'depois'))).toContain('A2')
+    // The fresh, empty state never overwrote the saved list: the first save under s2 kept A1.
+    expect((world.sets[0]?.value as Saved).items.map(x => x.id)).toEqual(['A1'])
+  })
+
+  test(`B: fresh state under a new id without side-stack: the own pane shows the saved list (${surface})`, async ($, on) => {
+    const stored = { 'assumptions:/tmp': { items: [one('A1', 'teste')], nextId: 2 } }
+    const world = await boot($, on, { stored, start: false })
+    world.session.id = 's2-alone'
+    const early = await ownPane($, surface)
+    expect(await early.find({ type: 'Text', text: /1 assumptions, 1 open/ })).toBeDefined()
+    await early.unmount()
+    await $.turn.start({ turnId: 't2', text: 'go on' })
+    expect(world.opened).toContain('assumptions')
+    const ui = await ownPane($, surface)
+    await ui.press({ key: 'toggle' })
+    expect(await ui.find({ type: 'Text', text: /A1 teste/ })).toBeDefined()
+    await ui.unmount()
+  })
+}
+
+test('side-stack counts as running from its /stack command alone (its flag is gone after /clear)', async ($, on) => {
+  sectionBeneath(on)
+  const world = await boot($, on, { host: false, hostCommand: true })
+  await logAssumption($, 'Sort by date')
+  expect(world.opened).not.toContain('assumptions')
+  const ui = await $.ui.mount({ ...STACK, surface: 'terminal' })
+  expect((await ui.findAll({ type: 'Text' })).map(t => t.text)[0]).toBe('Assumptions')
+  await ui.unmount()
 })

@@ -31,7 +31,5 @@ declare module 'claude-code' {
       removed: string[]
       stacked: boolean
     }
-    // Owned by the side-stack plugin; read here to know whether to draw inside its pane.
-    'side-stack': { present: boolean }
   }
 }

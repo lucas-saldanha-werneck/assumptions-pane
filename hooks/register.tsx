@@ -27,9 +27,6 @@ const clearedAt = atom({ plugin: 'assumptions-pane', key: 'clearedAt' } as const
 const removed = atom({ plugin: 'assumptions-pane', key: 'removed' } as const, [])
 // True while this plugin draws inside side-stack's pane (side-stack reads it).
 const stacked = atom({ plugin: 'assumptions-pane', key: 'stacked' } as const, false)
-// Set by the side-stack plugin (read only here). It never goes back to false
-// on its own, so presence also needs side-stack's live /stack command.
-const stackPresent = atom({ plugin: 'side-stack', key: 'present' } as const, false)
 
 // In the stack, the section keeps to this many items so it cannot push the
 // other sections off screen. The rest come in as answered ones leave.
@@ -59,6 +56,10 @@ let saveFailed = false
 // Whether side-stack's pane is up, as far as this plugin has seen.
 let stackSeenOpen = false
 let stackAsked = false
+// The session the list was loaded under. A /clear goes on under a new session
+// id with fresh state and no session.start, so a new id means: load again.
+let loadedSession: string | null = null
+let ensuring: Promise<void> | null = null
 
 // Increasing times: two changes in the same millisecond still order.
 async function stamp($: EngineInterface): Promise<number> {
@@ -74,9 +75,10 @@ async function stamp($: EngineInterface): Promise<number> {
 
 // --- side-stack presence ----------------------------------------------------
 
+// side-stack runs when its /stack command is listed. Its `present` state value
+// is per session and gone after a /clear, so it is not relied on.
 async function hostPresent($: EngineInterface): Promise<boolean> {
   try {
-    if ((await read($, stackPresent)) !== true) return false
     const cmds = await $.command.list()
     return cmds.some(c => c.name === 'stack' && (c.plugin ?? '').split('@')[0] === 'side-stack')
   } catch {
@@ -280,6 +282,74 @@ const settlePane = async ($: EngineInterface): Promise<void> => {
   else if ((await read($, items)).length > 0) await redraw($)
 }
 
+const sessionId = async ($: EngineInterface): Promise<string | null> => {
+  try {
+    return await $.session.id()
+  } catch {
+    return null
+  }
+}
+
+// The key for this folder: the one loaded, else from the session's folder.
+// Reads only, so a drawing may call it.
+async function folderKey($: EngineInterface): Promise<string | null> {
+  const key = (await read($, storeKey)) ?? lastKey
+  if (key !== null) return key
+  try {
+    return `assumptions:${await $.session.cwd()}`
+  } catch {
+    return null
+  }
+}
+
+// After a /clear (a new session id): load the saved list into the fresh state,
+// check side-stack again, publish `stacked`, and use the right pane.
+async function ensureSession($: EngineInterface): Promise<void> {
+  const id = await sessionId($)
+  if (id === null || id === loadedSession) return
+  if (ensuring !== null) return ensuring
+  ensuring = (async () => {
+    loadedSession = id
+    const key = await folderKey($)
+    if (key !== null) {
+      lastKey = key
+      if ((await read($, storeKey)) === null) await update($, storeKey, () => key)
+      await saveItems($)
+    }
+    await settlePane($)
+  })().finally(() => {
+    ensuring = null
+  })
+  return ensuring
+}
+
+// What a drawing shows right after a /clear, before the reload has run: the
+// saved list as the store holds it, and side-stack's presence asked directly.
+async function drawingState($: EngineInterface): Promise<{ isStacked: boolean; list?: Assumption[] }> {
+  const id = await sessionId($)
+  if (id === null || id === loadedSession) return { isStacked: await read($, stacked) }
+  // A drawing may not write state: the reload goes out from a timer.
+  try {
+    $.clock.after(0, () => {
+      void ensureSession($).catch(() => undefined)
+    })
+  } catch {
+    // The next prompt or turn reloads it.
+  }
+  let list: Assumption[] | undefined
+  try {
+    const key = await folderKey($)
+    const saved = key === null ? undefined : asSaved(await $.store.get(key))
+    if (saved !== undefined) {
+      const gone = new Set(saved.removed)
+      list = mergeLists([], saved, gone, saved.clearedAt)
+    }
+  } catch {
+    // Draw what the state holds.
+  }
+  return { isStacked: await hostPresent($), ...(list !== undefined ? { list } : {}) }
+}
+
 const setOne = async ($: EngineInterface, id: string, patch: Partial<Assumption>): Promise<void> => {
   const at = await stamp($)
   await setItems($, list => list.map(a => (a.id === id ? { ...a, ...patch, isSent: false, at } : a)))
@@ -396,14 +466,15 @@ async function askClear($: EngineInterface): Promise<void> {
 // Draws the list. Alone it fills our own pane; stacked it is one section of the
 // side-stack pane, with a heading, a row budget, and keys prefixed "as-" so they
 // never clash with another section's buttons.
-async function drawSection<E extends ResolveInput>($: EngineInterface, e: E, isStacked: boolean) {
+async function drawSection<E extends ResolveInput>($: EngineInterface, e: E, isStacked: boolean, saved?: Assumption[]) {
   const table = $.ui.resolve(e)
   const { Box, Text, Button } = table
   // A surface table without Input falls back to a hint. (A mobile app that does not draw
   // Input gets an empty Box instead, which a hook cannot detect.)
   const Input = 'Input' in table ? table.Input : undefined
   const k = (name: string): string => (isStacked ? `as-${name}` : name)
-  const list = await read($, items)
+  const held = await read($, items)
+  const list = saved !== undefined && held.length === 0 ? saved : held
   const expanded = await read($, isExpanded)
   const editId = await read($, editing)
   const open = list.filter(a => a.verdict === 'open').length
@@ -501,6 +572,7 @@ export const register: Register = on => {
     saveFailed = false
     stackSeenOpen = false
     stackAsked = false
+    loadedSession = await sessionId($)
     await update($, storeKey, () => key)
     // Loading is a merge with what is saved.
     await saveItems($)
@@ -556,6 +628,7 @@ export const register: Register = on => {
     const input = e as unknown as Record<string, unknown>
     const text = norm(String(input.assumption ?? '')).slice(0, 400)
     if (text === '') return { deny: 'log_assumption needs the assumption text.' }
+    await ensureSession($).catch(() => undefined)
     const why = norm(String(input.why ?? '')).slice(0, 200)
     await syncNextId($)
     // update() writes atomically and resolves what it wrote, so two calls at once get two numbers.
@@ -576,6 +649,7 @@ export const register: Register = on => {
   // A typed prompt carries any answers not sent yet. They leave the pane only
   // once the prompt has entered; if it is dropped or fails, they stay.
   on('prompt.submit', async ($, e, next) => {
+    await ensureSession($).catch(() => undefined)
     if (e.origin?.kind === 'plugin') {
       const result = await next(e)
       // Our own review entering the chat: its rows leave now.
@@ -604,6 +678,7 @@ export const register: Register = on => {
   // fresh state, the first turn also brings the saved list back.
   on('turn.start', async ($, e, next) => {
     if (e.agentId === undefined) {
+      await ensureSession($).catch(() => undefined)
       if ((await read($, storeKey)) === null && lastKey !== null) await saveItems($)
       await reviewEntered($, e.text).catch(() => undefined)
     }
@@ -622,6 +697,7 @@ export const register: Register = on => {
   })
 
   on('command.run', { command: 'assumptions' }, async ($, e) => {
+    await ensureSession($).catch(() => undefined)
     if (e.args.trim().toLowerCase() === 'clear') {
       await clearAll($)
       await redraw($)
@@ -639,20 +715,22 @@ export const register: Register = on => {
   })
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
-    if (await read($, stacked)) {
+    const now = await drawingState($)
+    if (now.isStacked) {
       // Never the list twice with live buttons.
       const { Text } = $.ui.resolve(e)
       return <Text dimColor>Shown in the Stack pane (/stack)</Text>
     }
-    return drawSection($, e, false)
+    return drawSection($, e, false, now.list)
   })
 
   // Inside side-stack's shared pane: our section, then every section beneath.
   on('ui.render', { component: 'Pane', requestId: STACK_PANE }, async ($, e, next) => {
     stackSeenOpen = true
-    if (!(await read($, stacked))) return next(e)
+    const now = await drawingState($)
+    if (!now.isStacked) return next(e)
     const { Box } = $.ui.resolve(e)
-    const section = await drawSection($, e, true)
+    const section = await drawSection($, e, true, now.list)
     return (
       <Box flexDirection="column">
         <Box key="assumptions-section" flexDirection="column" marginBottom={1}>{section}</Box>
