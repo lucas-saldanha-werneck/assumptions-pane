@@ -1,7 +1,7 @@
 {
   "name": "assumptions-pane",
-  "version": "0.3.2",
-  "description": "A side pane that lists the assumptions Claude makes while it builds, so you can mark each one right or wrong and send corrections.",
+  "version": "0.3.3",
+  "description": "A side pane that lists each assumption Claude makes, so you can mark it right or wrong.",
   "author": {
     "name": "Lucas Saldanha Werneck",
     "url": "https://github.com/lucas-saldanha-werneck"
