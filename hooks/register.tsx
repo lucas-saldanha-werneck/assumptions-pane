@@ -5,7 +5,7 @@ import type { Assumption } from '../types'
 
 // A small side pane: Claude logs each assumption it makes while it builds;
 // the person marks it right or wrong, types a change, and sends the answers.
-// Alone it draws its own pane; with the side-stack plugin installed it draws
+// Alone it draws its own pane; with the side-stack plugin running it draws
 // one section inside the shared "Stack" pane instead.
 
 const PANE = 'assumptions'
@@ -17,16 +17,25 @@ const editing = atom({ plugin: 'assumptions-pane', key: 'editing' } as const, nu
 const nextId = atom({ plugin: 'assumptions-pane', key: 'nextId' } as const, 1)
 // Ids sent with Send that have not entered yet (they wait for Claude's turn to end).
 const queued = atom({ plugin: 'assumptions-pane', key: 'queued' } as const, [])
-// The first press of "Clear all" asks for a second press.
-const confirmClear = atom({ plugin: 'assumptions-pane', key: 'confirmClear' } as const, false)
+// "Clear all" pressed once: the stamp of that press (0 = not asked). It expires.
+const confirmClear = atom({ plugin: 'assumptions-pane', key: 'confirmClear' } as const, 0)
 // Where the list is saved: `assumptions:<folder>`, set at session start.
 const storeKey = atom({ plugin: 'assumptions-pane', key: 'storeKey' } as const, null)
-// Set by the side-stack plugin while it runs (read only here).
+// The last "Clear all" (this session's or another's in the same folder).
+const clearedAt = atom({ plugin: 'assumptions-pane', key: 'clearedAt' } as const, 0)
+// Ids that left the list (sent, or over the cap), so a merge never brings them back.
+const removed = atom({ plugin: 'assumptions-pane', key: 'removed' } as const, [])
+// True while this plugin draws inside side-stack's pane (side-stack reads it).
+const stacked = atom({ plugin: 'assumptions-pane', key: 'stacked' } as const, false)
+// Set by the side-stack plugin (read only here). It never goes back to false
+// on its own, so presence also needs side-stack's live /stack command.
 const stackPresent = atom({ plugin: 'side-stack', key: 'present' } as const, false)
 
 // In the stack, the section keeps to this many items so it cannot push the
 // other sections off screen. The rest come in as answered ones leave.
 const STACK_ROWS = 6
+const CONFIRM_MS = 5000
+const MAX_REMOVED = 300
 
 const GUIDE = [
   'Assumptions pane: while you build or change something, each time you make an assumption the person did not state',
@@ -38,30 +47,157 @@ const GUIDE = [
 
 const toolName = ($: EngineInterface, name: string): string => `mcp__${$.plugin.name}__${name}`
 
-const isStacked = async ($: EngineInterface): Promise<boolean> => {
+// One line, single spaces: a review line then matches the prompt it entered in.
+const norm = (s: string): string => s.replace(/\s+/g, ' ').trim()
+
+// Module values: none of them is drawn from. They outlive a /clear (the process
+// goes on), which is what lastKey is for.
+let lastKey: string | null = null
+let lastStamp = 0
+let saving: Promise<void> = Promise.resolve()
+let saveFailed = false
+// Whether side-stack's pane is up, as far as this plugin has seen.
+let stackSeenOpen = false
+let stackAsked = false
+
+// Increasing times: two changes in the same millisecond still order.
+async function stamp($: EngineInterface): Promise<number> {
+  let now = 0
   try {
-    return (await read($, stackPresent)) === true
+    now = await $.clock.now()
+  } catch {
+    now = Date.now()
+  }
+  lastStamp = Math.max(now, lastStamp + 1)
+  return lastStamp
+}
+
+// --- side-stack presence ----------------------------------------------------
+
+async function hostPresent($: EngineInterface): Promise<boolean> {
+  try {
+    if ((await read($, stackPresent)) !== true) return false
+    const cmds = await $.command.list()
+    return cmds.some(c => c.name === 'stack' && (c.plugin ?? '').split('@')[0] === 'side-stack')
   } catch {
     return false
   }
 }
 
-// --- Saved list -------------------------------------------------------------
-// The list is kept in $.store per folder, so a /clear (a new session) or an app
-// reload brings it back. Only "Clear all" or /assumptions clear empties it.
+// Checks side-stack again and publishes this plugin's own `stacked` flag.
+async function checkStack($: EngineInterface): Promise<boolean> {
+  const isUp = await hostPresent($)
+  try {
+    await update($, stacked, () => isUp)
+  } catch {
+    // The flag is a hint for side-stack only.
+  }
+  return isUp
+}
 
-// Saves run one after another, each writing what the state holds when it runs,
-// so the last save always writes the latest list.
-let saving: Promise<void> = Promise.resolve()
+// Something new to see while stacked: bring side-stack's pane up if it is not.
+// $.command.run waits for the session to be idle and is refused inside a hook
+// the turn waits on, so it goes out from a timer, not from the hook.
+function bringStack($: EngineInterface, why: string): void {
+  if (stackSeenOpen || stackAsked) return
+  stackAsked = true
+  const fail = () => {
+    stackAsked = false
+    try {
+      $.ui.toast(`${why} Open the Stack pane with /stack to see it.`)
+    } catch {
+      // Nothing more to do.
+    }
+  }
+  try {
+    $.clock.after(0, () => {
+      void $.command.run({ command: 'stack', args: '' }).then(() => {
+        stackSeenOpen = true
+        stackAsked = false
+      }, fail)
+    })
+  } catch {
+    fail()
+  }
+}
+
+// --- Saved list -------------------------------------------------------------
+// The list is kept in $.store per folder, so a /clear or an app reload brings
+// it back. $.store is one file per plugin shared by every session, so each save
+// re-reads what is there and merges by id first: another session's items and
+// answers are kept, the higher next number wins, and a "Clear all" (clearedAt)
+// or a sent item (removed) is never brought back by a stale save.
+
+type Saved = { items: Assumption[]; nextId: number; clearedAt: number; removed: string[] }
+
+const asSaved = (raw: unknown): Saved | undefined => {
+  if (raw === undefined || raw === null || typeof raw !== 'object') return undefined
+  const v = raw as Partial<Saved>
+  const list = Array.isArray(v.items) ? v.items : []
+  return {
+    items: list
+      .filter(a => a !== null && typeof a === 'object' && typeof a.id === 'string' && typeof a.text === 'string')
+      .map(a => ({
+        ...a,
+        text: norm(a.text),
+        ...(a.why !== undefined ? { why: norm(String(a.why)) } : {}),
+        ...(a.correction !== undefined ? { correction: norm(String(a.correction)) } : {}),
+      })),
+    nextId: Number.isFinite(Number(v.nextId)) ? Number(v.nextId) : 1,
+    clearedAt: Number.isFinite(Number(v.clearedAt)) ? Number(v.clearedAt) : 0,
+    removed: Array.isArray(v.removed) ? v.removed.filter(id => typeof id === 'string') : [],
+  }
+}
+
+const idNumber = (id: string): number => Number(id.replace(/\D/g, '')) || 0
+
+function mergeLists(local: Assumption[], saved: Saved | undefined, gone: Set<string>, cleared: number): Assumption[] {
+  const byId = new Map<string, Assumption>()
+  for (const a of saved?.items ?? []) byId.set(a.id, a)
+  for (const a of local) {
+    const other = byId.get(a.id)
+    if (other === undefined || (a.at ?? 0) >= (other.at ?? 0)) byId.set(a.id, a)
+  }
+  const list = [...byId.values()]
+    .filter(a => !gone.has(a.id) && (cleared === 0 || (a.at ?? 0) > cleared))
+    .sort((a, b) => idNumber(a.id) - idNumber(b.id))
+  return capped(list)
+}
+
+// The key this session saves under. A /clear may start the new conversation
+// with fresh state and no session.start, so the module keeps the last key.
+async function currentKey($: EngineInterface): Promise<string | null> {
+  const key = await read($, storeKey)
+  if (key !== null) return key
+  if (lastKey !== null) await update($, storeKey, () => lastKey)
+  return lastKey
+}
 
 function saveItems($: EngineInterface): Promise<void> {
   saving = saving.then(async () => {
     try {
-      const key = await read($, storeKey)
+      const key = await currentKey($)
       if (key === null) return
-      await $.store.set(key, { items: await read($, items), nextId: await read($, nextId) })
-    } catch {
-      // The list still holds for this session.
+      const saved = asSaved(await $.store.get(key))
+      const cleared = await update($, clearedAt, c => Math.max(c, saved?.clearedAt ?? 0))
+      const gone = await update($, removed, r => [...new Set([...(saved?.removed ?? []), ...r])].slice(-MAX_REMOVED))
+      const goneSet = new Set(gone)
+      const merged = await update($, items, local => mergeLists(local, saved, goneSet, cleared))
+      const next = await update($, nextId, n => Math.max(n, saved?.nextId ?? 1))
+      // An empty folder keeps only a few bytes: its next number and its clear time.
+      if (merged.length === 0) await $.store.set(key, { items: [], nextId: next, clearedAt: cleared })
+      else await $.store.set(key, { items: merged, nextId: next, clearedAt: cleared, removed: gone })
+    } catch (err) {
+      // The list still holds for this session. Say so once, not on every change.
+      if (!saveFailed) {
+        saveFailed = true
+        try {
+          $.ui.log(`assumptions-pane: the list could not be saved (${String(err)}); it holds for this session only`)
+          $.ui.toast('Assumptions could not be saved; they hold for this session only.')
+        } catch {
+          // Nowhere to say it.
+        }
+      }
     }
   })
   return saving
@@ -72,25 +208,31 @@ async function setItems($: EngineInterface, fn: (list: Assumption[]) => Assumpti
   await saveItems($)
 }
 
-async function loadItems($: EngineInterface, cwd: string): Promise<void> {
-  const key = `assumptions:${cwd}`
-  await update($, storeKey, () => key)
+async function forget($: EngineInterface, ids: string[]): Promise<void> {
+  if (ids.length === 0) return
+  await update($, removed, r => [...new Set([...r, ...ids])].slice(-MAX_REMOVED))
+}
+
+// Takes the higher next number from the store before minting, so two sessions
+// in the same folder do not hand out the same number.
+async function syncNextId($: EngineInterface): Promise<void> {
   try {
-    const saved = (await $.store.get(key)) as { items?: Assumption[]; nextId?: number } | undefined
-    if (saved === undefined || saved === null || !Array.isArray(saved.items)) return
-    const list = saved.items
-    if ((await read($, items)).length === 0) await update($, items, () => list)
-    const savedNext = Number(saved.nextId ?? 1)
-    if (Number.isFinite(savedNext)) await update($, nextId, n => Math.max(n, savedNext))
+    const key = await currentKey($)
+    if (key === null) return
+    const saved = asSaved(await $.store.get(key))
+    if (saved !== undefined) await update($, nextId, n => Math.max(n, saved.nextId))
   } catch {
-    // Starts empty.
+    // This session's own count stands.
   }
 }
 
 async function clearAll($: EngineInterface): Promise<void> {
+  const at = await stamp($)
+  await update($, clearedAt, c => Math.max(c, at))
+  await update($, removed, () => [])
   await setItems($, () => [])
   await update($, editing, () => null)
-  await update($, confirmClear, () => false)
+  await update($, confirmClear, () => 0)
 }
 
 // --- Pane -------------------------------------------------------------------
@@ -109,10 +251,13 @@ const closeOwnPane = async ($: EngineInterface): Promise<void> => {
   }
 }
 
-const openPane = async ($: EngineInterface, focus = false): Promise<void> => {
-  if (await isStacked($)) {
+// Shows the list where it lives now. `why` set: something new the person
+// should see, so a closed Stack pane is brought up.
+const openPane = async ($: EngineInterface, focus = false, why?: string): Promise<void> => {
+  if (await checkStack($)) {
     // The state reads in the section's drawing redraw it on their own.
     await closeOwnPane($)
+    if (why !== undefined) bringStack($, why)
     return
   }
   const list = await read($, items)
@@ -128,15 +273,16 @@ const redraw = async ($: EngineInterface): Promise<void> => {
   }
 }
 
-// At session start, and once more a second later (plugin load order is not
+// At session start, and again 0.1 s and 1.1 s later (plugin load order is not
 // known, so side-stack may start after this plugin): pick the pane to use.
 const settlePane = async ($: EngineInterface): Promise<void> => {
-  if (await isStacked($)) await closeOwnPane($)
+  if (await checkStack($)) await closeOwnPane($)
   else if ((await read($, items)).length > 0) await redraw($)
 }
 
 const setOne = async ($: EngineInterface, id: string, patch: Partial<Assumption>): Promise<void> => {
-  await setItems($, list => list.map(a => (a.id === id ? { ...a, ...patch, isSent: false } : a)))
+  const at = await stamp($)
+  await setItems($, list => list.map(a => (a.id === id ? { ...a, ...patch, isSent: false, at } : a)))
   await openPane($)
 }
 
@@ -147,7 +293,7 @@ const unsent = (list: Assumption[]): Assumption[] =>
   list.filter(a => !a.isSent && (a.verdict !== 'open' || (a.correction ?? '') !== ''))
 
 const reviewLine = (a: Assumption): string => {
-  const fix = (a.correction ?? '').trim()
+  const fix = norm(a.correction ?? '')
   if (a.verdict === 'right' && fix === '') return `- ${a.id} RIGHT: ${a.text}`
   if (fix !== '') return `- ${a.id} ${a.verdict === 'right' ? 'RIGHT, but change' : 'CHANGE'}: ${a.text} -> ${fix}`
   return `- ${a.id} WRONG: ${a.text} (do not keep this; ask me if the right choice is not clear)`
@@ -164,6 +310,7 @@ const sameAnswer = (a: Assumption, b: Assumption): boolean =>
 const markSent = async ($: EngineInterface, delivered: Assumption[]): Promise<void> => {
   const isDelivered = (a: Assumption) => delivered.some(d => d.id === a.id && sameAnswer(a, d))
   const ids = (await read($, items)).filter(isDelivered).map(a => a.id)
+  await forget($, ids)
   await setItems($, list => list.filter(a => !isDelivered(a)))
   await update($, editing, v => (v !== null && ids.includes(v) ? null : v))
   await redraw($)
@@ -177,7 +324,7 @@ const reviewEntered = async ($: EngineInterface, text: string): Promise<void> =>
   if (!text.includes(REVIEW_HEAD)) return
   const ids = [...text.matchAll(/^- (A\d+) /gm)].map(m => m[1] ?? '').filter(id => id !== '')
   if (ids.length === 0) return
-  const lines = new Set(text.split('\n'))
+  const lines = new Set(text.split('\n').map(l => l.trimEnd()))
   const delivered = (await read($, items)).filter(a => ids.includes(a.id) && lines.has(reviewLine(a)))
   await update($, queued, q => q.filter(id => !ids.includes(id)))
   if (delivered.length > 0) await markSent($, delivered)
@@ -219,7 +366,7 @@ const sendNow = async ($: EngineInterface): Promise<void> => {
 // The list keeps at most this many items. Answers not sent yet never count
 // against it: only the oldest items with nothing to send leave.
 const MAX_ITEMS = 100
-const capped = (list: Assumption[]): Assumption[] => {
+function capped(list: Assumption[]): Assumption[] {
   let excess = list.length - MAX_ITEMS
   if (excess <= 0) return list
   return list.filter(a => {
@@ -231,26 +378,39 @@ const capped = (list: Assumption[]): Assumption[] => {
   })
 }
 
+// First press of "Clear all": ask again for a few seconds, then forget it.
+async function askClear($: EngineInterface): Promise<void> {
+  const token = await stamp($)
+  await update($, confirmClear, () => token)
+  try {
+    $.clock.after(CONFIRM_MS, () => {
+      void update($, confirmClear, v => (v === token ? 0 : v)).catch(() => undefined)
+    })
+  } catch {
+    // Without a timer the question stays until Cancel or Yes.
+  }
+}
+
 // --- Drawing ----------------------------------------------------------------
 
 // Draws the list. Alone it fills our own pane; stacked it is one section of the
 // side-stack pane, with a heading, a row budget, and keys prefixed "as-" so they
 // never clash with another section's buttons.
-async function drawSection<E extends ResolveInput>($: EngineInterface, e: E, stacked: boolean) {
+async function drawSection<E extends ResolveInput>($: EngineInterface, e: E, isStacked: boolean) {
   const table = $.ui.resolve(e)
   const { Box, Text, Button } = table
   // A surface table without Input falls back to a hint. (A mobile app that does not draw
   // Input gets an empty Box instead, which a hook cannot detect.)
   const Input = 'Input' in table ? table.Input : undefined
-  const k = (name: string): string => (stacked ? `as-${name}` : name)
+  const k = (name: string): string => (isStacked ? `as-${name}` : name)
   const list = await read($, items)
   const expanded = await read($, isExpanded)
   const editId = await read($, editing)
   const open = list.filter(a => a.verdict === 'open').length
   const queuedIds = await read($, queued)
-  const confirm = await read($, confirmClear)
+  const confirm = (await read($, confirmClear)) > 0
   const waiting = unsent(list).filter(a => !queuedIds.includes(a.id)).length
-  const shown = stacked ? list.slice(0, STACK_ROWS) : list
+  const shown = isStacked ? list.slice(0, STACK_ROWS) : list
   const hidden = list.length - shown.length
 
   const summary = list.length === 0 ? 'No assumptions yet' : `${list.length} assumptions, ${open} open`
@@ -259,7 +419,7 @@ async function drawSection<E extends ResolveInput>($: EngineInterface, e: E, sta
       {expanded ? 'Hide' : 'Show'}
     </Button>
   )
-  const header = stacked ? (
+  const header = isStacked ? (
     <Box flexDirection="row" gap={1} alignItems="center">
       <Text bold>Assumptions</Text>
       <Text dimColor>{list.length === 0 ? 'none yet' : `${list.length}, ${open} open`}</Text>
@@ -303,7 +463,7 @@ async function drawSection<E extends ResolveInput>($: EngineInterface, e: E, sta
               value={a.correction ?? ''}
               autoFocus
               onSubmit={async (value: string) => {
-                await setOne($, a.id, { correction: value.trim(), verdict: a.verdict === 'open' ? 'wrong' : a.verdict })
+                await setOne($, a.id, { correction: norm(value).slice(0, 400), verdict: a.verdict === 'open' ? 'wrong' : a.verdict })
                 await update($, editing, () => null)
               }}
             />
@@ -319,12 +479,14 @@ async function drawSection<E extends ResolveInput>($: EngineInterface, e: E, sta
           <Button key={k('all-right')} plain onPress={async () => {
             // Only rows the person can see: hidden ones are never marked unseen.
             const seen = shown.map(a => a.id)
-            await setItems($, l => l.map(a => (a.verdict === 'open' && seen.includes(a.id) ? { ...a, verdict: 'right' as const, isSent: false } : a)))
+            const at = await stamp($)
+            await setItems($, l => l.map(a => (a.verdict === 'open' && seen.includes(a.id) ? { ...a, verdict: 'right' as const, isSent: false, at } : a)))
             await openPane($)
           }}>{hidden > 0 ? 'All shown are right' : 'All open are right'}</Button>
+          {/* Asked: Cancel takes the place "Clear all" had, so a double press cancels. */}
+          {confirm && <Button key={k('clear-no')} plain onPress={() => update($, confirmClear, () => 0)}>Cancel</Button>}
           {confirm && <Button key={k('clear-yes')} onPress={() => clearAll($)}>Yes, clear all</Button>}
-          {confirm && <Button key={k('clear-no')} plain onPress={() => update($, confirmClear, () => false)}>Cancel</Button>}
-          {!confirm && <Button key={k('clear')} plain onPress={() => update($, confirmClear, () => true)}>Clear all</Button>}
+          {!confirm && <Button key={k('clear')} plain onPress={() => askClear($)}>Clear all</Button>}
         </Box>
       )}
     </Box>
@@ -333,7 +495,15 @@ async function drawSection<E extends ResolveInput>($: EngineInterface, e: E, sta
 
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
-    await loadItems($, e.cwd)
+    const key = `assumptions:${e.cwd}`
+    lastKey = key
+    saving = Promise.resolve()
+    saveFailed = false
+    stackSeenOpen = false
+    stackAsked = false
+    await update($, storeKey, () => key)
+    // Loading is a merge with what is saved.
+    await saveItems($)
     await $.tool.register({
       name: 'log_assumption',
       description:
@@ -354,15 +524,24 @@ export const register: Register = on => {
       argumentHint: 'clear',
     })
     await settlePane($)
-    try {
-      $.clock.after(1000, () => {
-        void settlePane($).catch(() => undefined)
-      })
-    } catch {
-      // No timer: the first check stands.
+    for (const ms of [100, 1100]) {
+      try {
+        $.clock.after(ms, () => {
+          void settlePane($).catch(() => undefined)
+        })
+      } catch {
+        // No timer: the first check stands.
+      }
     }
     return next(e)
   })
+
+  // A /clear ends the conversation and the process goes on with no new
+  // session.start. Let a save in flight finish; the list is not emptied.
+  on('session.end', async ($, e, next) => {
+    await saving.catch(() => undefined)
+    return next(e)
+  }).catch(($, e, next) => next(e))
 
   on('prompt.compose', async ($, e, next) => {
     const result = await next(e)
@@ -375,16 +554,22 @@ export const register: Register = on => {
   on('tool.call', async ($, e, next) => {
     if (String(e.tool) !== toolName($, 'log_assumption')) return next(e)
     const input = e as unknown as Record<string, unknown>
-    const text = String(input.assumption ?? '').trim().slice(0, 400)
+    const text = norm(String(input.assumption ?? '')).slice(0, 400)
     if (text === '') return { deny: 'log_assumption needs the assumption text.' }
-    const why = String(input.why ?? '').trim().slice(0, 200)
+    const why = norm(String(input.why ?? '')).slice(0, 200)
+    await syncNextId($)
     // update() writes atomically and resolves what it wrote, so two calls at once get two numbers.
     const id = `A${(await update($, nextId, n => n + 1)) - 1}`
-    await setItems($, list => {
-      const one: Assumption = { id, text, verdict: 'open', isSent: false, ...(why !== '' ? { why } : {}) }
+    const at = await stamp($)
+    const prevIds = (await read($, items)).map(a => a.id)
+    const after = await update($, items, list => {
+      const one: Assumption = { id, text, verdict: 'open', isSent: false, at, ...(why !== '' ? { why } : {}) }
       return capped([...list, one])
     })
-    await openPane($)
+    // Rows the cap pushed out stay out of the saved list too.
+    await forget($, prevIds.filter(old => !after.some(a => a.id === old)))
+    await saveItems($)
+    await openPane($, false, `New assumption ${id}.`)
     return { result: `Logged as ${id}. Keep working; the person may correct it later.` }
   }).catch(($, e, next) => next(e))
 
@@ -415,11 +600,26 @@ export const register: Register = on => {
   }).catch(($, e, next) => next(e))
 
   // A sent review starting its turn entered the chat, even when the submit's
-  // promise never settles: its rows leave.
+  // promise never settles: its rows leave. After a /clear that started with
+  // fresh state, the first turn also brings the saved list back.
   on('turn.start', async ($, e, next) => {
-    if (e.agentId === undefined) await reviewEntered($, e.text).catch(() => undefined)
+    if (e.agentId === undefined) {
+      if ((await read($, storeKey)) === null && lastKey !== null) await saveItems($)
+      await reviewEntered($, e.text).catch(() => undefined)
+    }
     return next(e)
   }).catch(($, e, next) => next(e))
+
+  // Follows side-stack's pane: brought up only while it is not open.
+  on('ui.open', async ($, e, next) => {
+    const result = await next(e)
+    if (e.id === STACK_PANE) stackSeenOpen = true
+    return result
+  })
+  on('ui.close', async ($, e, next) => {
+    if (e.id === STACK_PANE) stackSeenOpen = false
+    return next(e)
+  })
 
   on('command.run', { command: 'assumptions' }, async ($, e) => {
     if (e.args.trim().toLowerCase() === 'clear') {
@@ -428,19 +628,29 @@ export const register: Register = on => {
       return { text: 'Assumptions list cleared.' }
     }
     await update($, isExpanded, () => true)
-    if (await isStacked($)) {
+    if (await checkStack($)) {
       await closeOwnPane($)
+      stackSeenOpen = false
+      bringStack($, 'The assumptions are in the Stack pane.')
       return { text: 'Assumptions are in the Stack pane (/stack opens it).' }
     }
     await openPane($, true)
     return { text: 'Assumptions pane opened.' }
   })
 
-  on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => drawSection($, e, false))
+  on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
+    if (await read($, stacked)) {
+      // Never the list twice with live buttons.
+      const { Text } = $.ui.resolve(e)
+      return <Text dimColor>Shown in the Stack pane (/stack)</Text>
+    }
+    return drawSection($, e, false)
+  })
 
   // Inside side-stack's shared pane: our section, then every section beneath.
   on('ui.render', { component: 'Pane', requestId: STACK_PANE }, async ($, e, next) => {
-    if (!(await isStacked($))) return next(e)
+    stackSeenOpen = true
+    if (!(await read($, stacked))) return next(e)
     const { Box } = $.ui.resolve(e)
     const section = await drawSection($, e, true)
     return (

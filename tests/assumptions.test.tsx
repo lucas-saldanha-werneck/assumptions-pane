@@ -199,44 +199,81 @@ test('the 100-item cap never drops an answer that was not sent', async ($, on) =
 })
 
 // --- Saved list, Clear all, side-stack ---------------------------------------
+// Every drawing below runs on both the terminal and the desktop app.
+
+const SURFACES = ['terminal', 'desktop'] as const
+type Surface = (typeof SURFACES)[number]
 
 type World = {
   kept: Record<string, unknown>
+  sets: { key: string; value: unknown }[]
   opened: string[]
   closed: string[]
   sent: string[]
-  host: { present: boolean }
+  logs: string[]
+  stackRuns: number
+  host: { present: boolean; command: boolean }
   clock: ReturnType<typeof mock.clock>
 }
 
 /** The world beneath the plugin, with a store the test can read (mock.store
- *  does not hand its contents back) and a side-stack host that may be there. */
+ *  does not hand its contents back) and a side-stack host that may be there:
+ *  its `present` value and its live /stack command, each on its own. */
 async function boot(
   $: Engine,
   on: On,
-  options: { stored?: Record<string, unknown>; host?: boolean; ownPaneUp?: boolean; submit?: 'enter' | 'hang' } = {},
+  options: {
+    stored?: Record<string, unknown>
+    host?: boolean
+    hostCommand?: boolean
+    ownPaneUp?: boolean
+    submit?: 'enter' | 'hang'
+    storeBroken?: boolean
+  } = {},
 ): Promise<World> {
   const world: World = {
     kept: { ...(options.stored ?? {}) },
+    sets: [],
     opened: [],
     closed: [],
     sent: [],
-    host: { present: options.host ?? false },
+    logs: [],
+    stackRuns: 0,
+    host: { present: options.host ?? false, command: options.hostCommand ?? options.host ?? false },
     clock: mock.clock(on, { now: 1_000_000 }),
   }
   let ownPaneUp = options.ownPaneUp ?? false
   on('store.get', (_$, e) => ({ value: world.kept[(e as { key: string }).key] }) as never)
   on('store.set', (_$, e) => {
+    if (options.storeBroken === true) throw new Error('store full')
     const one = e as { key: string; value: unknown }
     world.kept[one.key] = JSON.parse(JSON.stringify(one.value))
+    world.sets.push({ key: one.key, value: world.kept[one.key] })
     return { value: undefined } as never
   })
-  // Stands for the side-stack plugin's value.
+  // Stands for the side-stack plugin's value and its command.
   on('state.get', { plugin: 'side-stack', key: 'present' }, () => ({ value: { value: world.host.present, version: 1 } }) as never)
+  on('command.list', () =>
+    ({
+      value: [
+        { name: 'help', description: 'Help', source: 'builtin' },
+        ...(world.host.command ? [{ name: 'stack', description: 'Open the Stack side pane', source: 'plugin', plugin: 'side-stack@side-stack' }] : []),
+      ],
+    }) as never,
+  )
+  on('command.run', { command: 'stack' }, () => {
+    world.stackRuns++
+    return { text: 'Stack pane opened.' }
+  })
   on('session.start', (_$, e) => ({ cwd: e.cwd }))
+  on('session.end', (_$, e) => ({ sessionId: e.sessionId }) as never)
   on('tool.register', (_$, e) => ({ value: { tool: `mcp__assumptions-pane__${e.name}` } }))
   on('command.register', (_$, e) => ({ value: { command: e.name } }))
   on('ui.toast', () => ({ value: undefined }))
+  on('ui.log', (_$, e) => {
+    world.logs.push(String((e as { text?: string }).text ?? ''))
+    return { value: undefined } as never
+  })
   on('turn.start', (_$, e) => ({ turnId: e.turnId }))
   on('ui.open', async (_$, e) => {
     world.opened.push(e.id)
@@ -258,7 +295,8 @@ async function boot(
   return world
 }
 
-type Saved = { items: { id: string; text: string; verdict: string }[]; nextId: number }
+type Saved = { items: { id: string; text: string; verdict: string; correction?: string }[]; nextId: number; clearedAt?: number }
+const savedAt = (world: World, key = 'assumptions:/tmp'): Saved => world.kept[key] as Saved
 
 // Buttons drawn in side-stack's pane belong to this plugin.
 const AP = 'assumptions-pane'
@@ -278,164 +316,262 @@ const sectionBeneath = (on: On): void => {
   })
 }
 
-test('the list is saved per folder, with its numbering', async ($, on) => {
-  const world = await boot($, on)
-  await logAssumption($, 'Sort by date')
-  await logAssumption($, 'Use tabs')
-  const ui = await $.ui.mount({ plugin: 'assumptions-pane', surface: 'terminal', ...PANE })
-  await ui.press({ key: 'toggle' })
-  await ui.press({ key: 'wrong-A1' })
-  await ui.unmount()
-  const saved = world.kept['assumptions:/tmp'] as Saved
-  expect(saved.items.map(a => `${a.id} ${a.verdict}`)).toEqual(['A1 wrong', 'A2 open'])
-  expect(saved.nextId).toBe(3)
-})
+const one = (id: string, text: string, verdict = 'open', extra: object = {}) => ({ id, text, verdict, isSent: false, ...extra })
+const ownPane = ($: Engine, surface: Surface) => $.ui.mount({ plugin: AP, surface, ...PANE })
+const settle = async (): Promise<void> => {
+  for (let i = 0; i < 50; i++) await Promise.resolve()
+}
 
-test('after a /clear or a reload the saved list comes back and numbering goes on', async ($, on) => {
-  // What the session before the /clear saved (the shape the test above checks).
-  const stored = {
-    'assumptions:/tmp': {
-      items: [
-        { id: 'A4', text: 'Keep the old logo', verdict: 'open', isSent: false },
-        { id: 'A5', text: 'Use port 8080', verdict: 'wrong', isSent: false },
-      ],
-      nextId: 6,
-    },
-    'assumptions:/elsewhere': { items: [{ id: 'A1', text: 'Another folder', verdict: 'open', isSent: false }], nextId: 2 },
-  }
-  const world = await boot($, on, { stored })
-  // A saved list opens the pane on its own.
-  expect(world.opened).toContain('assumptions')
-  const ui = await $.ui.mount({ plugin: 'assumptions-pane', surface: 'terminal', ...PANE })
-  await ui.press({ key: 'toggle' })
-  expect(await ui.find({ type: 'Text', text: /A4 Keep the old logo/ })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: /Another folder/ })).toBeUndefined()
-  const logged = await logAssumption($, 'Use blue')
-  expect(JSON.stringify(logged)).toContain('A6')
-  // The unsent answer saved before the /clear still goes to Claude.
-  await ui.press({ key: 'send' })
-  expect(world.sent.at(-1)).toContain('A5 WRONG: Use port 8080')
-  await ui.unmount()
-})
+for (const surface of SURFACES) {
+  test(`the list is saved per folder, with its numbering (${surface})`, async ($, on) => {
+    const world = await boot($, on)
+    await logAssumption($, 'Sort by date')
+    await logAssumption($, 'Use tabs')
+    const ui = await ownPane($, surface)
+    await ui.press({ key: 'toggle' })
+    await ui.press({ key: 'wrong-A1' })
+    await ui.unmount()
+    const saved = savedAt(world)
+    expect(saved.items.map(a => `${a.id} ${a.verdict}`)).toEqual(['A1 wrong', 'A2 open'])
+    expect(saved.nextId).toBe(3)
+  })
 
-test('Clear all needs two presses, and empties the saved list too', async ($, on) => {
-  const stored = { 'assumptions:/tmp': { items: [{ id: 'A4', text: 'Keep the old logo', verdict: 'open', isSent: false }], nextId: 5 } }
-  const world = await boot($, on, { stored })
-  const ui = await $.ui.mount({ plugin: 'assumptions-pane', surface: 'terminal', ...PANE })
-  await ui.press({ key: 'toggle' })
-  await ui.press({ key: 'clear' })
-  expect(await ui.find({ type: 'Text', text: /A4 Keep the old logo/ })).toBeDefined()
-  expect(await ui.find({ key: 'clear-yes' })).toBeDefined()
-  await ui.press({ key: 'clear-no' })
-  expect(await ui.find({ key: 'clear-yes' })).toBeUndefined()
-  await ui.press({ key: 'clear' })
-  await ui.press({ key: 'clear-yes' })
-  expect(await ui.find({ type: 'Text', text: /Keep the old logo/ })).toBeUndefined()
-  expect((world.kept['assumptions:/tmp'] as Saved).items).toEqual([])
-  // Numbers keep counting after a clear.
-  expect(JSON.stringify(await logAssumption($, 'Use blue'))).toContain('A5')
-  await ui.unmount()
-})
+  test(`a new session in the same folder gets the saved list back and numbering goes on (${surface})`, async ($, on) => {
+    const stored = {
+      'assumptions:/tmp': { items: [one('A4', 'Keep the old logo'), one('A5', 'Use port 8080', 'wrong')], nextId: 6 },
+      'assumptions:/elsewhere': { items: [one('A1', 'Another folder')], nextId: 2 },
+    }
+    const world = await boot($, on, { stored })
+    // A saved list opens the pane on its own.
+    expect(world.opened).toContain('assumptions')
+    const ui = await ownPane($, surface)
+    await ui.press({ key: 'toggle' })
+    expect(await ui.find({ type: 'Text', text: /A4 Keep the old logo/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /Another folder/ })).toBeUndefined()
+    expect(JSON.stringify(await logAssumption($, 'Use blue'))).toContain('A6')
+    // The unsent answer saved before still goes to Claude.
+    await ui.press({ key: 'send' })
+    expect(world.sent.at(-1)).toContain('A5 WRONG: Use port 8080')
+    await ui.unmount()
+  })
 
-test('/assumptions clear empties the list and the store', async ($, on) => {
-  const stored = { 'assumptions:/tmp': { items: [{ id: 'A4', text: 'Keep the old logo', verdict: 'open', isSent: false }], nextId: 5 } }
-  const world = await boot($, on, { stored })
-  const out = await $.command.run({ command: 'assumptions', args: 'clear' } as never)
-  expect(JSON.stringify(out)).toContain('cleared')
-  expect((world.kept['assumptions:/tmp'] as Saved).items).toEqual([])
-})
+  test(`XR2 Clear all: a double press lands on Cancel, Yes clears, the question expires (${surface})`, async ($, on) => {
+    const stored = { 'assumptions:/tmp': { items: [one('A4', 'Keep', 'wrong')], nextId: 5 } }
+    const world = await boot($, on, { stored })
+    const ui = await ownPane($, surface)
+    await ui.press({ key: 'toggle' })
+    const keys = async () => (await ui.findAll({ type: 'Button' } as never)).map(b => (b as { key?: string }).key)
+    const before = await keys()
+    await ui.press({ key: 'clear' })
+    const after = await keys()
+    // The slot "Clear all" had now holds Cancel, so a second press there cancels.
+    expect(after[before.indexOf('clear')]).toBe('clear-no')
+    await ui.press({ key: after[before.indexOf('clear')] as string })
+    expect(await ui.find({ type: 'Text', text: /A4 Keep/ })).toBeDefined()
+    expect(await ui.find({ key: 'clear' })).toBeDefined()
+    // Asked and left alone, the question goes away after 5 seconds.
+    await ui.press({ key: 'clear' })
+    await world.clock.advance(5000)
+    expect(await ui.find({ key: 'clear-yes' })).toBeUndefined()
+    // Asked and confirmed: empty, saved empty, numbers go on.
+    await ui.press({ key: 'clear' })
+    await ui.press({ key: 'clear-yes' })
+    expect(await ui.find({ type: 'Text', text: /A4 Keep/ })).toBeUndefined()
+    expect(savedAt(world).items).toEqual([])
+    expect(JSON.stringify(await logAssumption($, 'Use blue'))).toContain('A5')
+    await ui.unmount()
+  })
 
-test('a sent review leaves once its turn starts, even if the submit never settles', async ($, on) => {
-  const stored = {
-    'assumptions:/tmp': {
-      items: [
-        { id: 'A59', text: 'Turn off the notice', verdict: 'open', isSent: false },
-        { id: 'A60', text: 'Use tabs', verdict: 'open', isSent: false },
-      ],
-      nextId: 61,
-    },
-  }
-  const world = await boot($, on, { stored, submit: 'hang' })
-  const ui = await $.ui.mount({ plugin: 'assumptions-pane', surface: 'terminal', ...PANE })
-  await ui.press({ key: 'toggle' })
-  await ui.press({ key: 'wrong-A59' })
-  await ui.press({ key: 'right-A60' })
-  void ui.press({ key: 'send' })
-  for (let i = 0; i < 400 && world.sent.length === 0; i++) await Promise.resolve()
-  expect(world.sent.at(-1)).toContain('A59 WRONG')
-  // A60 changed while the review waited: its new answer must stay to send again.
-  await ui.press({ key: 'wrong-A60' })
-  await $.turn.start({ turnId: 't2', text: `The assumptions-pane plugin sent a message: ${world.sent.at(-1)}` })
-  expect(await ui.find({ type: 'Text', text: /Turn off the notice/ })).toBeUndefined()
-  expect(await ui.find({ type: 'Text', text: /A60 Use tabs/ })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: /waiting for Claude/ })).toBeUndefined()
-  expect((world.kept['assumptions:/tmp'] as Saved).items.map(a => a.id)).toEqual(['A60'])
-  await ui.unmount()
-})
+  test(`a sent review leaves once its turn starts, even if the submit never settles (${surface})`, async ($, on) => {
+    const stored = { 'assumptions:/tmp': { items: [one('A59', 'Turn off the notice'), one('A60', 'Use tabs')], nextId: 61 } }
+    const world = await boot($, on, { stored, submit: 'hang' })
+    const ui = await ownPane($, surface)
+    await ui.press({ key: 'toggle' })
+    await ui.press({ key: 'wrong-A59' })
+    await ui.press({ key: 'right-A60' })
+    void ui.press({ key: 'send' })
+    for (let i = 0; i < 400 && world.sent.length === 0; i++) await Promise.resolve()
+    expect(world.sent.at(-1)).toContain('A59 WRONG')
+    // A60 changed while the review waited: its new answer must stay to send again.
+    await ui.press({ key: 'wrong-A60' })
+    await $.turn.start({ turnId: 't2', text: `The assumptions-pane plugin sent a message: ${world.sent.at(-1)}` })
+    expect(await ui.find({ type: 'Text', text: /Turn off the notice/ })).toBeUndefined()
+    expect(await ui.find({ type: 'Text', text: /A60 Use tabs/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /waiting for Claude/ })).toBeUndefined()
+    expect(savedAt(world).items.map(a => a.id)).toEqual(['A60'])
+    await ui.unmount()
+  })
 
-test('with side-stack running: no own pane, a section in the Stack pane above the next one', async ($, on) => {
-  sectionBeneath(on)
-  const world = await boot($, on, { host: true, ownPaneUp: true })
-  // The own pane opened before (a reload) is closed at start.
-  expect(world.closed).toContain('assumptions')
-  await logAssumption($, 'Sort by date')
-  expect(world.opened).not.toContain('assumptions')
-  for (const surface of ['terminal', 'desktop'] as const) {
+  test(`XR3 an assumption with line breaks leaves once its review enters, and is sent once (${surface})`, async ($, on) => {
+    const world = await boot($, on, { submit: 'hang' })
+    await logAssumption($, 'Use port 8080\nand   host 0.0.0.0')
+    const ui = await ownPane($, surface)
+    await ui.press({ key: 'toggle' })
+    expect(await ui.find({ type: 'Text', text: /A1 Use port 8080 and host 0\.0\.0\.0/ })).toBeDefined()
+    await ui.press({ key: 'wrong-A1' })
+    void ui.press({ key: 'send' })
+    for (let i = 0; i < 400 && world.sent.length === 0; i++) await Promise.resolve()
+    await $.turn.start({ turnId: 't2', text: world.sent.at(-1) as string })
+    expect(await ui.find({ type: 'Text', text: /A1 Use port/ })).toBeUndefined()
+    expect(await ui.find({ key: 'send' })).toBeUndefined()
+    await settle()
+    expect(world.sent.length).toBe(1)
+    await ui.unmount()
+  })
+
+  test(`with side-stack running: a section in the Stack pane above the next one, own pane one line (${surface})`, async ($, on) => {
+    sectionBeneath(on)
+    const world = await boot($, on, { host: true, ownPaneUp: true })
+    // The own pane opened before (a reload) is closed at start.
+    expect(world.closed).toContain('assumptions')
+    await logAssumption($, 'Sort by date')
+    expect(world.opened).not.toContain('assumptions')
     const ui = await $.ui.mount({ ...STACK, surface })
     const texts = (await ui.findAll({ type: 'Text' })).map(t => t.text)
     expect(texts[0]).toBe('Assumptions')
     // next(e) is drawn too, beneath the section.
     expect(texts.at(-1)).toBe('NEXT-SECTION')
+    // The buttons work inside the stack, with keys that do not clash with other sections.
+    await ui.press({ plugin: AP, key: 'as-toggle' })
+    await ui.press({ plugin: AP, key: 'as-wrong-A1' })
+    await ui.press({ plugin: AP, key: 'as-send' })
+    expect(world.sent.at(-1)).toContain('A1 WRONG: Sort by date')
+    expect(await ui.find({ type: 'Text', text: /NEXT-SECTION/ })).toBeDefined()
     await ui.unmount()
-  }
-  // The buttons work inside the stack, with keys that do not clash with other sections.
-  const ui = await $.ui.mount({ ...STACK, surface: 'terminal' })
-  await ui.press({ plugin: AP, key: 'as-toggle' })
-  await ui.press({ plugin: AP, key: 'as-wrong-A1' })
-  await ui.press({ plugin: AP, key: 'as-send' })
-  expect(world.sent.at(-1)).toContain('A1 WRONG: Sort by date')
-  expect(await ui.find({ type: 'Text', text: /NEXT-SECTION/ })).toBeDefined()
-  await ui.unmount()
-  expect(world.opened).not.toContain('assumptions')
-  const out = await $.command.run({ command: 'assumptions', args: '' } as never)
-  expect(JSON.stringify(out)).toContain('Stack pane')
+    // An own pane still drawn somewhere shows one line, never the list twice.
+    const own = await ownPane($, surface)
+    expect((await own.findAll({ type: 'Text' })).map(t => t.text)).toEqual(['Shown in the Stack pane (/stack)'])
+    expect(await own.find({ key: 'toggle' })).toBeUndefined()
+    await own.unmount()
+    expect(world.opened).not.toContain('assumptions')
+  })
+
+  test(`in the stack the section keeps to its row budget (${surface})`, async ($, on) => {
+    sectionBeneath(on)
+    await boot($, on, { host: true })
+    for (let i = 1; i <= 9; i++) await logAssumption($, `Choice ${i}`)
+    const ui = await $.ui.mount({ ...STACK, surface })
+    await ui.press({ plugin: AP, key: 'as-toggle' })
+    expect(await ui.find({ plugin: AP, key: 'as-right-A6' } as never)).toBeDefined()
+    expect(await ui.find({ plugin: AP, key: 'as-right-A7' } as never)).toBeUndefined()
+    expect(await ui.find({ type: 'Text', text: /\+3 more/ })).toBeDefined()
+    // "All shown are right" never marks a row the person did not see.
+    await ui.press({ plugin: AP, key: 'as-all-right' })
+    await ui.press({ plugin: AP, key: 'as-send' })
+    await ui.unmount()
+    const ui2 = await $.ui.mount({ ...STACK, surface })
+    expect(await ui2.find({ plugin: AP, key: 'as-right-A7' } as never)).toBeDefined()
+    expect(await ui2.find({ type: 'Text', text: /\+3 more/ })).toBeUndefined()
+    await ui2.unmount()
+  })
+
+  test(`without side-stack nothing changes: own pane, nothing drawn in the stack (${surface})`, async ($, on) => {
+    sectionBeneath(on)
+    const world = await boot($, on, { host: false })
+    await logAssumption($, 'Sort by date')
+    expect(world.opened).toContain('assumptions')
+    expect(world.stackRuns).toBe(0)
+    const ui = await $.ui.mount({ ...STACK, surface })
+    expect((await ui.findAll({ type: 'Text' })).map(t => t.text)).toEqual(['NEXT-SECTION'])
+    await ui.unmount()
+    const own = await ownPane($, surface)
+    expect(await own.find({ type: 'Text', text: /1 assumptions, 1 open/ })).toBeDefined()
+    await own.unmount()
+  })
+}
+
+test('/assumptions clear empties the list and the store', async ($, on) => {
+  const world = await boot($, on, { stored: { 'assumptions:/tmp': { items: [one('A4', 'Keep the old logo')], nextId: 5 } } })
+  const out = await $.command.run({ command: 'assumptions', args: 'clear' } as never)
+  expect(JSON.stringify(out)).toContain('cleared')
+  expect(savedAt(world).items).toEqual([])
+  expect(savedAt(world).nextId).toBe(5)
 })
 
-test('in the stack the section keeps to its row budget', async ($, on) => {
-  sectionBeneath(on)
-  await boot($, on, { host: true })
-  for (let i = 1; i <= 9; i++) await logAssumption($, `Choice ${i}`)
-  const ui = await $.ui.mount({ ...STACK, surface: 'terminal' })
-  await ui.press({ plugin: AP, key: 'as-toggle' })
-  expect(await ui.find({ plugin: AP, key: 'as-right-A6' } as never)).toBeDefined()
-  expect(await ui.find({ plugin: AP, key: 'as-right-A7' } as never)).toBeUndefined()
-  expect(await ui.find({ type: 'Text', text: /\+3 more/ })).toBeDefined()
-  // "All shown are right" never marks a row the person did not see.
-  await ui.press({ plugin: AP, key: 'as-all-right' })
-  await ui.press({ plugin: AP, key: 'as-send' })
-  await ui.unmount()
-  const ui2 = await $.ui.mount({ ...STACK, surface: 'terminal' })
-  expect(await ui2.find({ plugin: AP, key: 'as-right-A7' } as never)).toBeDefined()
-  expect(await ui2.find({ type: 'Text', text: /\+3 more/ })).toBeUndefined()
-  await ui2.unmount()
+test('XR1 another session in the same folder: its items are kept and its numbers are not reused', async ($, on) => {
+  const world = await boot($, on, { stored: { 'assumptions:/tmp': { items: [one('A1', 'Old')], nextId: 2 } } })
+  // Another session in /tmp logs A2 and saves.
+  world.kept['assumptions:/tmp'] = { items: [one('A1', 'Old'), one('A2', 'Other session', 'wrong', { at: 2_000_000 })], nextId: 3 }
+  const r = await logAssumption($, 'Mine')
+  expect(JSON.stringify(r)).toContain('A3')
+  expect(savedAt(world).items.map(a => `${a.id} ${a.text}`)).toEqual(['A1 Old', 'A2 Other session', 'A3 Mine'])
+  expect(savedAt(world).nextId).toBe(4)
 })
 
-test('without side-stack nothing changes: own pane, nothing drawn in the stack', async ($, on) => {
+test("another session's Clear all is not undone by this session's stale list", async ($, on) => {
+  const world = await boot($, on, { stored: { 'assumptions:/tmp': { items: [one('A1', 'Old', 'open', { at: 1_000_000 })], nextId: 2 } } })
+  // The other session cleared the folder after this one loaded it.
+  world.kept['assumptions:/tmp'] = { items: [], nextId: 2, clearedAt: 1_500_000 }
+  await world.clock.advance(600_000)
+  await logAssumption($, 'After the clear')
+  expect(savedAt(world).items.map(a => a.id)).toEqual(['A2'])
+})
+
+test('a /clear (session end, no new session.start) keeps the list and never saves it empty', async ($, on) => {
+  const world = await boot($, on, { stored: { 'assumptions:/tmp': { items: [one('A1', 'Keep me')], nextId: 2 } } })
+  await logAssumption($, 'Before the clear')
+  // The docs: a /clear raises session.end with reason "clear"; the process goes on, no session.start follows.
+  await $.session.end({ reason: 'clear', sessionId: 's1', resume: { id: 's1' } } as never)
+  await $.turn.start({ turnId: 't9', text: 'next job' })
+  expect(JSON.stringify(await logAssumption($, 'After the clear'))).toContain('A3')
+  expect(savedAt(world).items.map(a => a.id)).toEqual(['A1', 'A2', 'A3'])
+  expect(world.sets.every(s => (s.value as Saved).items.length > 0)).toBe(true)
+  const ui = await ownPane($, 'desktop')
+  await ui.press({ key: 'toggle' })
+  expect(await ui.find({ type: 'Text', text: /A1 Keep me/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('a store that cannot be written is said once, and the list still works', async ($, on) => {
+  const world = await boot($, on, { storeBroken: true })
+  await logAssumption($, 'One')
+  await logAssumption($, 'Two')
+  expect(world.logs.filter(l => l.includes('could not be saved')).length).toBe(1)
+  const ui = await ownPane($, 'terminal')
+  await ui.press({ key: 'toggle' })
+  expect(await ui.find({ key: 'right-A2' })).toBeDefined()
+  await ui.unmount()
+})
+
+test('a stale side-stack flag without its /stack command counts as absent', async ($, on) => {
   sectionBeneath(on)
-  const world = await boot($, on, { host: false })
+  const world = await boot($, on, { host: true, hostCommand: false })
   await logAssumption($, 'Sort by date')
   expect(world.opened).toContain('assumptions')
-  const ui = await $.ui.mount({ ...STACK, surface: 'terminal' })
-  const texts = (await ui.findAll({ type: 'Text' })).map(t => t.text)
-  expect(texts).toEqual(['NEXT-SECTION'])
+  const ui = await $.ui.mount({ ...STACK, surface: 'desktop' })
+  expect((await ui.findAll({ type: 'Text' })).map(t => t.text)).toEqual(['NEXT-SECTION'])
   await ui.unmount()
 })
 
-test('side-stack starting after this plugin is seen a second later', async ($, on) => {
+test('stacked, a new assumption brings the Stack pane up only when it is not open', async ($, on) => {
+  await boot($, on, { host: true }).then(async world => {
+    await logAssumption($, 'First')
+    await world.clock.advance(1)
+    expect(world.stackRuns).toBe(1)
+    await logAssumption($, 'Second')
+    await world.clock.advance(1)
+    expect(world.stackRuns).toBe(1)
+    // (Reopening after the person closes it follows side-stack's ui.close; the
+    // test engine cannot raise another plugin's close, so that part is not tested.)
+    expect(world.opened).not.toContain('assumptions')
+  })
+})
+
+test('side-stack starting after this plugin is seen within about a second', async ($, on) => {
   const world = await boot($, on, { host: false })
   await logAssumption($, 'Sort by date')
   expect(world.opened).toContain('assumptions')
   world.host.present = true
-  await world.clock.advance(1000)
+  world.host.command = true
+  await world.clock.advance(1100)
   expect(world.closed).toContain('assumptions')
+})
+
+test('side-stack going away brings the own pane back on the next assumption', async ($, on) => {
+  const world = await boot($, on, { host: true })
+  await logAssumption($, 'First')
+  expect(world.opened).not.toContain('assumptions')
+  world.host.command = false
+  await logAssumption($, 'Second')
+  expect(world.opened).toContain('assumptions')
 })
