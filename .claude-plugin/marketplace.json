@@ -9,7 +9,7 @@
     {
       "name": "assumptions-pane",
       "source": "./",
-      "description": "A side pane that lists the assumptions Claude makes while it builds, so you can mark each one right or wrong and send corrections."
+      "description": "A side pane that lists each assumption Claude makes, so you can mark it right or wrong."
     }
   ]
 }

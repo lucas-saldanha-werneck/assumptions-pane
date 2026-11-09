@@ -1,7 +1,7 @@
 # assumptions-pane
 
-A Claude Code mod that lists the assumptions Claude makes while it works in a side pane, so you can
-mark each one right or wrong and send corrections in one message. Claude does not stop to ask, and
+A Claude Code mod: a side pane that lists each assumption Claude makes while it works, so you can
+mark it right or wrong and send corrections in one message. Claude does not stop to ask, and
 it does not guess silently either.
 
 Each time Claude picks something you did not state (a default value, a file name, one option over
@@ -53,21 +53,11 @@ An item marked Wrong with no change typed is sent as
 At the prompt of a terminal Claude Code session:
 
 ```
-/plugin install assumptions-pane --marketplace lucas-saldanha-werneck/assumptions-pane
+/plugin marketplace add lucas-saldanha-werneck/claude-plugins
+/plugin install assumptions-pane@lucas-plugins
 ```
 
-Or from a shell:
-
-```
-claude plugin install assumptions-pane --marketplace lucas-saldanha-werneck/assumptions-pane
-```
-
-You can also add the marketplace first and then install:
-
-```
-/plugin marketplace add lucas-saldanha-werneck/assumptions-pane
-/plugin install assumptions-pane@assumptions-pane
-```
+From a shell, the same commands work with `claude plugin` in place of `/plugin`.
 
 `/plugin` does not run in the desktop app. Install from a terminal with the user scope, and the mod
 also loads in the desktop app's local Code sessions.
@@ -169,13 +159,12 @@ drawing, including from a timer the drawing starts.)
 ## Uninstall
 
 ```
-/plugin uninstall assumptions-pane@assumptions-pane
-/plugin marketplace remove assumptions-pane
+/plugin uninstall assumptions-pane@lucas-plugins
 ```
 
 From a shell, the same commands work with `claude plugin` in place of `/plugin`.
 
-## Limits and what was not tested
+## Limits
 
 - Built and tested on Claude Code 2.1.319. It needs a version with mods (hooks modules).
 - The tests draw the pane on the `terminal` and `desktop` surfaces. Nobody has tried it by hand in the
