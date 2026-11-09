@@ -30,6 +30,8 @@ declare module 'claude-code' {
       clearedAt: number
       removed: string[]
       stacked: boolean
+      // The session id the list was loaded under (gone with the state on a /clear).
+      loadedFor: string | null
     }
   }
 }

@@ -27,6 +27,11 @@ const clearedAt = atom({ plugin: 'assumptions-pane', key: 'clearedAt' } as const
 const removed = atom({ plugin: 'assumptions-pane', key: 'removed' } as const, [])
 // True while this plugin draws inside side-stack's pane (side-stack reads it).
 const stacked = atom({ plugin: 'assumptions-pane', key: 'stacked' } as const, false)
+// The session id the list was loaded under. Kept in state, not in the module:
+// on a /clear, events can arrive under the new id before the state is emptied,
+// and a marker in the module would then say "loaded" for a state that is gone.
+// In state it vanishes with the list, so the next look loads again.
+const loadedFor = atom({ plugin: 'assumptions-pane', key: 'loadedFor' } as const, null)
 
 // In the stack, the section keeps to this many items so it cannot push the
 // other sections off screen. The rest come in as answered ones leave.
@@ -56,9 +61,7 @@ let saveFailed = false
 // Whether side-stack's pane is up, as far as this plugin has seen.
 let stackSeenOpen = false
 let stackAsked = false
-// The session the list was loaded under. A /clear goes on under a new session
-// id with fresh state and no session.start, so a new id means: load again.
-let loadedSession: string | null = null
+// One reload at a time.
 let ensuring: Promise<void> | null = null
 // The session watch: started once per process, it outlives a /clear.
 let watching = false
@@ -314,7 +317,7 @@ async function folderKey($: EngineInterface): Promise<string | null> {
 // check side-stack again, publish `stacked`, and use the right pane.
 async function ensureSession($: EngineInterface): Promise<void> {
   const id = await sessionId($)
-  if (id === null || id === loadedSession) return
+  if (id === null || id === (await read($, loadedFor))) return
   if (ensuring !== null) return ensuring
   ensuring = (async () => {
     // The id is recorded only once the reload worked, so a reload that failed
@@ -327,7 +330,7 @@ async function ensureSession($: EngineInterface): Promise<void> {
     }
     const isUp = await hostPresent($)
     await update($, stacked, () => isUp)
-    loadedSession = id
+    await update($, loadedFor, () => id)
     await settlePane($)
   })().finally(() => {
     ensuring = null
@@ -339,7 +342,7 @@ async function ensureSession($: EngineInterface): Promise<void> {
 // saved list as the store holds it, and side-stack's presence asked directly.
 async function drawingState($: EngineInterface): Promise<{ isStacked: boolean; list?: Assumption[] }> {
   const id = await sessionId($)
-  if (id === null || id === loadedSession) return { isStacked: await read($, stacked) }
+  if (id === null || id === (await read($, loadedFor))) return { isStacked: await read($, stacked) }
   // A drawing may not write state, and a timer started here runs as part of
   // this drawing (the engine refused its writes after a real /clear), so the
   // reload is left to the session watch and the next event.
@@ -606,7 +609,10 @@ export const register: Register = on => {
     saveFailed = false
     stackSeenOpen = false
     stackAsked = false
-    loadedSession = await sessionId($)
+    {
+      const id = await sessionId($)
+      await update($, loadedFor, () => id)
+    }
     await update($, storeKey, () => key)
     // Loading is a merge with what is saved.
     await saveItems($)

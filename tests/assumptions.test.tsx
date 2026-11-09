@@ -747,3 +747,37 @@ for (const surface of SURFACES) {
     expect(JSON.stringify(await logAssumption($, 'depois'))).toContain('A3')
   })
 }
+
+// The race seen on 2.1.319: after a /clear, events can reach the mod under the
+// NEW session id BEFORE session state is emptied. A reload done in that window
+// must not count once the state empties: the next event loads again, so the
+// section stays in the stack with the saved list.
+for (const surface of SURFACES) {
+  test(`a reload made before the state empties at a /clear is done again (${surface})`, async ($, on) => {
+    sectionBeneath(on)
+    let state: Record<string, { value: unknown; version: number }> = {}
+    on('state.get', async (_$, e) => {
+      const a = e as { plugin: string; key: string }
+      return { value: state[`${a.plugin}.${a.key}`] ?? { value: undefined, version: 0 } } as never
+    })
+    on('state.set', async (_$, e) => {
+      const a = e as { plugin: string; key: string; value: unknown }
+      const version = (state[`${a.plugin}.${a.key}`]?.version ?? 0) + 1
+      state[`${a.plugin}.${a.key}`] = { value: a.value, version }
+      return { value: { isSet: true, version } } as never
+    })
+    const stored = { 'assumptions:/tmp': { items: [one('A1', 'teste'), one('A2', 'outra')], nextId: 3 } }
+    const world = await boot($, on, { stored, host: false, hostCommand: true })
+    await $.session.end({ reason: 'clear', sessionId: 's1', resume: {} } as never)
+    world.session.id = 's2-late'
+    await $.prompt.submit(TYPED) // reaches the mod under the new id, state not emptied yet
+    state = {} // now the engine empties session state
+    await $.prompt.submit(TYPED)
+    await $.turn.start({ turnId: 't2', text: 'go on' })
+    const ui = await $.ui.mount({ ...STACK, surface })
+    const texts = (await ui.findAll({ type: 'Text' })).map(t => t.text)
+    expect(texts[0]).toBe('Assumptions')
+    expect(texts).toContain('2, 2 open')
+    await ui.unmount()
+  })
+}
