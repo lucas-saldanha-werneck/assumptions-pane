@@ -463,6 +463,32 @@ async function askClear($: EngineInterface): Promise<void> {
 
 // --- Drawing ----------------------------------------------------------------
 
+// side-stack orders its sections by these keys (protocol v4): ours is
+// `side-stack:assumptions-pane`, and an empty Box keyed
+// `side-stack:slot:assumptions-pane` in the tree beneath is where it goes.
+const SECTION_KEY = 'side-stack:assumptions-pane'
+const SLOT_KEY = 'side-stack:slot:assumptions-pane'
+
+type Tree = { props?: Record<string, unknown>; children?: unknown[] }
+
+// A copy of the tree with our slot replaced by the section, or undefined when
+// the tree has no slot (side-stack is not beneath, or keeps install order).
+function fillSlot(node: unknown, section: unknown): unknown {
+  const el = node as Tree | null
+  if (el === null || typeof el !== 'object' || !Array.isArray(el.children)) return undefined
+  for (let i = 0; i < el.children.length; i++) {
+    const child = el.children[i] as Tree | null
+    const swapped =
+      child !== null && typeof child === 'object' && child.props?.key === SLOT_KEY ? section : fillSlot(child, section)
+    if (swapped !== undefined) {
+      const children = [...el.children]
+      children[i] = swapped
+      return { ...el, children }
+    }
+  }
+  return undefined
+}
+
 // Draws the list. Alone it fills our own pane; stacked it is one section of the
 // side-stack pane, with a heading, a row budget, and keys prefixed "as-" so they
 // never clash with another section's buttons.
@@ -724,17 +750,25 @@ export const register: Register = on => {
     return drawSection($, e, false, now.list)
   })
 
-  // Inside side-stack's shared pane: our section, then every section beneath.
+  // Inside side-stack's shared pane: our section, then every section beneath,
+  // unless side-stack left an empty slot for us (a set order): then it goes there.
   on('ui.render', { component: 'Pane', requestId: STACK_PANE }, async ($, e, next) => {
     stackSeenOpen = true
     const now = await drawingState($)
     if (!now.isStacked) return next(e)
     const { Box } = $.ui.resolve(e)
-    const section = await drawSection($, e, true, now.list)
+    const section = (
+      <Box key={SECTION_KEY} flexDirection="column" marginBottom={1}>
+        {await drawSection($, e, true, now.list)}
+      </Box>
+    )
+    const below = await next(e)
+    const filled = fillSlot(below, section)
+    if (filled !== undefined) return filled as typeof below
     return (
       <Box flexDirection="column">
-        <Box key="assumptions-section" flexDirection="column" marginBottom={1}>{section}</Box>
-        {await next(e)}
+        {section}
+        {below}
       </Box>
     )
   })

@@ -668,3 +668,50 @@ test('side-stack counts as running from its /stack command alone (its flag is go
   expect((await ui.findAll({ type: 'Text' })).map(t => t.text)[0]).toBe('Assumptions')
   await ui.unmount()
 })
+
+// v4: side-stack may set an order. It then leaves an empty Box keyed
+// `side-stack:slot:assumptions-pane` where this section goes; with no slot
+// the section goes on top of what is beneath, as before.
+const stackBeneathWithSlot = (on: On): void => {
+  on('ui.render', { component: 'Pane', requestId: 'side-stack' }, ($, e) => {
+    const { Box, Text } = $.ui.resolve(e)
+    return (
+      <Box flexDirection="column">
+        <Text>EARLIER-SECTION</Text>
+        <Box key="side-stack:slot:assumptions-pane" flexDirection="column" />
+        <Text>LATER-SECTION</Text>
+      </Box>
+    )
+  })
+}
+
+for (const surface of SURFACES) {
+  test(`a slot side-stack left is filled by the section, in its place (${surface})`, async ($, on) => {
+    stackBeneathWithSlot(on)
+    const world = await boot($, on, { host: true })
+    await logAssumption($, 'Sort by date')
+    const ui = await $.ui.mount({ ...STACK, surface })
+    const texts = (await ui.findAll({ type: 'Text' })).map(t => t.text)
+    expect(texts).toEqual(['EARLIER-SECTION', 'Assumptions', '1, 1 open', 'LATER-SECTION'])
+    // The buttons work in that place too.
+    await ui.press({ plugin: AP, key: 'as-toggle' })
+    await ui.press({ plugin: AP, key: 'as-wrong-A1' })
+    await ui.press({ plugin: AP, key: 'as-send' })
+    expect(world.sent.at(-1)).toContain('A1 WRONG: Sort by date')
+    const after = (await ui.findAll({ type: 'Text' })).map(t => t.text)
+    expect(after[0]).toBe('EARLIER-SECTION')
+    expect(after.at(-1)).toBe('LATER-SECTION')
+    expect(after.filter(t => t === 'Assumptions').length).toBe(1)
+    await ui.unmount()
+  })
+
+  test(`with no slot the section goes on top of the sections beneath, as before (${surface})`, async ($, on) => {
+    sectionBeneath(on)
+    await boot($, on, { host: true })
+    await logAssumption($, 'Sort by date')
+    const ui = await $.ui.mount({ ...STACK, surface })
+    const texts = (await ui.findAll({ type: 'Text' })).map(t => t.text)
+    expect(texts).toEqual(['Assumptions', '1, 1 open', 'NEXT-SECTION'])
+    await ui.unmount()
+  })
+}

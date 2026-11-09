@@ -108,7 +108,7 @@ There are no settings and nothing else to install.
 ## Works alone or inside side-stack
 
 The desktop app and the terminal show separate panes as tabs, one at a time. If you use more than
-one of these panes (assumptions-pane, idea-shelf, plan-checklist), the
+one of these panes (assumptions-pane, idea-shelf, plan-checklist, clean-view), the
 [side-stack](https://github.com/lucas-saldanha-werneck/side-stack) mod gives them one shared pane,
 "Stack", with each mod's part drawn one under the other.
 
@@ -130,8 +130,11 @@ one of these panes (assumptions-pane, idea-shelf, plan-checklist), the
   (/stack)", so the list never appears twice.
 - While it draws inside the Stack pane the mod sets its own `stacked` value, which side-stack reads
   to hide its install hint.
-- The order of the parts inside the Stack pane follows the order Claude Code loads the plugins in.
-  It cannot be set.
+- By default the parts inside the Stack pane follow the order Claude Code loads the plugins in
+  (install order). side-stack can change it (`/stack order assumptions-pane,idea-shelf`, see its
+  README). This mod draws its part in a box keyed `side-stack:assumptions-pane`; when side-stack
+  has set an order it leaves an empty box keyed `side-stack:slot:assumptions-pane`, and the mod
+  draws its part there. With no such box it draws on top of the parts beneath, as before.
 - If side-stack starts after this mod, the mod notices within about a second and closes its own pane.
 
 ## Terminal and desktop app
