@@ -60,6 +60,9 @@ let stackAsked = false
 // id with fresh state and no session.start, so a new id means: load again.
 let loadedSession: string | null = null
 let ensuring: Promise<void> | null = null
+// The session watch: started once per process, it outlives a /clear.
+let watching = false
+const WATCH_MS = 1500
 
 // Increasing times: two changes in the same millisecond still order.
 async function stamp($: EngineInterface): Promise<number> {
@@ -175,11 +178,12 @@ async function currentKey($: EngineInterface): Promise<string | null> {
   return lastKey
 }
 
-function saveItems($: EngineInterface): Promise<void> {
-  saving = saving.then(async () => {
+// Resolves true once the merge landed in state and the store took it.
+function saveItems($: EngineInterface): Promise<boolean> {
+  const run = saving.then(async (): Promise<boolean> => {
     try {
       const key = await currentKey($)
-      if (key === null) return
+      if (key === null) return false
       const saved = asSaved(await $.store.get(key))
       const cleared = await update($, clearedAt, c => Math.max(c, saved?.clearedAt ?? 0))
       const gone = await update($, removed, r => [...new Set([...(saved?.removed ?? []), ...r])].slice(-MAX_REMOVED))
@@ -189,6 +193,7 @@ function saveItems($: EngineInterface): Promise<void> {
       // An empty folder keeps only a few bytes: its next number and its clear time.
       if (merged.length === 0) await $.store.set(key, { items: [], nextId: next, clearedAt: cleared })
       else await $.store.set(key, { items: merged, nextId: next, clearedAt: cleared, removed: gone })
+      return true
     } catch (err) {
       // The list still holds for this session. Say so once, not on every change.
       if (!saveFailed) {
@@ -200,12 +205,15 @@ function saveItems($: EngineInterface): Promise<void> {
           // Nowhere to say it.
         }
       }
+      return false
     }
   })
-  return saving
+  saving = run.then(() => undefined)
+  return run
 }
 
 async function setItems($: EngineInterface, fn: (list: Assumption[]) => Assumption[]): Promise<void> {
+  await ensureSession($).catch(() => undefined)
   await update($, items, fn)
   await saveItems($)
 }
@@ -309,13 +317,17 @@ async function ensureSession($: EngineInterface): Promise<void> {
   if (id === null || id === loadedSession) return
   if (ensuring !== null) return ensuring
   ensuring = (async () => {
-    loadedSession = id
+    // The id is recorded only once the reload worked, so a reload that failed
+    // (for example a write refused) is tried again on the next event.
     const key = await folderKey($)
     if (key !== null) {
       lastKey = key
       if ((await read($, storeKey)) === null) await update($, storeKey, () => key)
-      await saveItems($)
+      if (!(await saveItems($))) return
     }
+    const isUp = await hostPresent($)
+    await update($, stacked, () => isUp)
+    loadedSession = id
     await settlePane($)
   })().finally(() => {
     ensuring = null
@@ -328,14 +340,9 @@ async function ensureSession($: EngineInterface): Promise<void> {
 async function drawingState($: EngineInterface): Promise<{ isStacked: boolean; list?: Assumption[] }> {
   const id = await sessionId($)
   if (id === null || id === loadedSession) return { isStacked: await read($, stacked) }
-  // A drawing may not write state: the reload goes out from a timer.
-  try {
-    $.clock.after(0, () => {
-      void ensureSession($).catch(() => undefined)
-    })
-  } catch {
-    // The next prompt or turn reloads it.
-  }
+  // A drawing may not write state, and a timer started here runs as part of
+  // this drawing (the engine refused its writes after a real /clear), so the
+  // reload is left to the session watch and the next event.
   let list: Assumption[] | undefined
   try {
     const key = await folderKey($)
@@ -405,6 +412,7 @@ const reviewEntered = async ($: EngineInterface, text: string): Promise<void> =>
 // until the prompt has entered; if it is dropped or fails, give them back so
 // nothing is lost.
 const sendNow = async ($: EngineInterface): Promise<void> => {
+  await ensureSession($).catch(() => undefined)
   const waitingIds = await read($, queued)
   const list = unsent(await read($, items)).filter(a => !waitingIds.includes(a.id))
   if (list.length === 0) return
@@ -629,6 +637,18 @@ export const register: Register = on => {
         })
       } catch {
         // No timer: the first check stands.
+      }
+    }
+    // A /clear fires no session.start, and a drawing may not reload, so a
+    // watch started here (outside any drawing) reloads once the id changes.
+    if (!watching) {
+      try {
+        $.clock.every(WATCH_MS, () => {
+          void ensureSession($).catch(() => undefined)
+        })
+        watching = true
+      } catch {
+        // The next prompt, turn, command or press reloads it.
       }
     }
     return next(e)

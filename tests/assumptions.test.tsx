@@ -232,6 +232,8 @@ async function boot(
     storeBroken?: boolean
     /** false: no session.start under this session id (fresh state, as after a /clear). */
     start?: boolean
+    /** The first N store reads fail (a reload that does not land). */
+    storeGetFails?: number
   } = {},
 ): Promise<World> {
   const world: World = {
@@ -249,7 +251,14 @@ async function boot(
   on('session.id', () => ({ value: world.session.id }) as never)
   on('session.cwd', () => ({ value: '/tmp' }) as never)
   let ownPaneUp = options.ownPaneUp ?? false
-  on('store.get', (_$, e) => ({ value: world.kept[(e as { key: string }).key] }) as never)
+  let getFails = options.storeGetFails ?? 0
+  on('store.get', (_$, e) => {
+    if (getFails > 0) {
+      getFails--
+      throw new Error('store busy')
+    }
+    return { value: world.kept[(e as { key: string }).key] } as never
+  })
   on('store.set', (_$, e) => {
     if (options.storeBroken === true) throw new Error('store full')
     const one = e as { key: string; value: unknown }
@@ -713,5 +722,28 @@ for (const surface of SURFACES) {
     const texts = (await ui.findAll({ type: 'Text' })).map(t => t.text)
     expect(texts).toEqual(['Assumptions', '1, 1 open', 'NEXT-SECTION'])
     await ui.unmount()
+  })
+}
+
+// v5: after a real /clear the engine refused the reload's writes (it ran from a
+// timer started while drawing). The id was already recorded, so the reload was
+// never tried again and the section stayed gone. A reload that fails must be
+// tried again on the next event.
+for (const surface of SURFACES) {
+  test(`a reload after /clear that fails is tried again on the next event (${surface})`, async ($, on) => {
+    sectionBeneath(on)
+    const stored = { 'assumptions:/tmp': { items: [one('A1', 'teste'), one('A2', 'outra')], nextId: 3 } }
+    const world = await boot($, on, { stored, host: false, hostCommand: true, start: false, storeGetFails: 1 })
+    world.session.id = 's2-retry'
+    await $.prompt.submit(TYPED)
+    await $.turn.start({ turnId: 't2', text: 'go on' })
+    const ui = await $.ui.mount({ ...STACK, surface })
+    const texts = (await ui.findAll({ type: 'Text' })).map(t => t.text)
+    expect(texts[0]).toBe('Assumptions')
+    expect(texts).toContain('2, 2 open')
+    await ui.press({ plugin: AP, key: 'as-toggle' })
+    expect(await ui.find({ type: 'Text', text: /A2 outra/ })).toBeDefined()
+    await ui.unmount()
+    expect(JSON.stringify(await logAssumption($, 'depois'))).toContain('A3')
   })
 }
