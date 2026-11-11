@@ -53,7 +53,7 @@ An item marked Wrong with no change typed is sent as
 At the prompt of a terminal Claude Code session:
 
 ```
-/plugin marketplace add lucas-saldanha-werneck/claude-plugins
+/plugin marketplace add lucas-saldanha-werneck/lucas-tools
 /plugin install assumptions-pane@lucas-tools
 ```
 
