@@ -54,7 +54,7 @@ At the prompt of a terminal Claude Code session:
 
 ```
 /plugin marketplace add lucas-saldanha-werneck/claude-plugins
-/plugin install assumptions-pane@lucas-plugins
+/plugin install assumptions-pane@lucas-tools
 ```
 
 From a shell, the same commands work with `claude plugin` in place of `/plugin`.
@@ -159,7 +159,7 @@ drawing, including from a timer the drawing starts.)
 ## Uninstall
 
 ```
-/plugin uninstall assumptions-pane@lucas-plugins
+/plugin uninstall assumptions-pane@lucas-tools
 ```
 
 From a shell, the same commands work with `claude plugin` in place of `/plugin`.

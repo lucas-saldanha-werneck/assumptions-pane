@@ -1,6 +1,6 @@
 {
   "name": "assumptions-pane",
-  "version": "0.3.3",
+  "version": "0.3.4",
   "description": "A side pane that lists each assumption Claude makes, so you can mark it right or wrong.",
   "author": {
     "name": "Lucas Saldanha Werneck",
