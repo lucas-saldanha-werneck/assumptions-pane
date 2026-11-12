@@ -38,6 +38,14 @@ const loadedFor = atom({ plugin: 'assumptions-pane', key: 'loadedFor' } as const
 const STACK_ROWS = 6
 const CONFIRM_MS = 5000
 const MAX_REMOVED = 300
+// Each process marks its own items, so two sessions in one folder never mix up
+// two items that got the same number, and a correction goes to the Claude that
+// made the assumption. A process saves a heartbeat while it holds items of its
+// own; an owner not seen for ALIVE_MS is gone, and any session sends its answers.
+const OWNER = Math.random().toString(36).slice(2, 10) || 'owner'
+const BEAT_MS = 60_000
+const ALIVE_MS = 3 * BEAT_MS
+const OWNER_TTL_MS = 24 * 60 * 60 * 1000
 
 const GUIDE = [
   'Assumptions pane: while you build or change something, each time you make an assumption the person did not state',
@@ -66,6 +74,38 @@ let ensuring: Promise<void> | null = null
 // The session watch: started once per process, it outlives a /clear.
 let watching = false
 const WATCH_MS = 1500
+// Owners' last heartbeats as last read from the store, and this process's last one.
+let owners: Record<string, number> = {}
+let lastBeat = 0
+// Highest number among ids trimmed off `removed`: an item at or below it never comes back.
+let removedFloor = 0
+
+// The identity of an item: its number and the process that logged it.
+const uid = (a: { id: string; owner?: string }): string => (a.owner !== undefined ? `${a.id}@${a.owner}` : a.id)
+const isGone = (a: Assumption, gone: Set<string>, floor: number): boolean =>
+  gone.has(uid(a)) || gone.has(a.id) || (floor > 0 && idNumber(a.id) <= floor)
+const alive = (owner: string, now: number): boolean => owner === OWNER || (owners[owner] ?? 0) > now - ALIVE_MS
+// Answers this session may send: its own, old ones without an owner, and those of an owner that is gone.
+const mine = (a: Assumption, now: number): boolean =>
+  a.owner === undefined || a.owner === OWNER || !alive(a.owner, now)
+// A key for drawing: the plain id for this session's rows, the owner added for another's.
+const rowKey = (a: Assumption): string => (a.owner === undefined || a.owner === OWNER ? a.id : `${a.id}-${a.owner}`)
+
+async function nowMs($: EngineInterface): Promise<number> {
+  try {
+    return await $.clock.now()
+  } catch {
+    return Date.now()
+  }
+}
+
+// Keeps `removed` to MAX_REMOVED; the numbers trimmed off raise the floor.
+function trimRemoved(list: string[]): string[] {
+  if (list.length <= MAX_REMOVED) return list
+  const cut = list.slice(0, list.length - MAX_REMOVED)
+  for (const r of cut) removedFloor = Math.max(removedFloor, idNumber(r))
+  return list.slice(-MAX_REMOVED)
+}
 
 // Increasing times: two changes in the same millisecond still order.
 async function stamp($: EngineInterface): Promise<number> {
@@ -136,7 +176,14 @@ function bringStack($: EngineInterface, why: string): void {
 // answers are kept, the higher next number wins, and a "Clear all" (clearedAt)
 // or a sent item (removed) is never brought back by a stale save.
 
-type Saved = { items: Assumption[]; nextId: number; clearedAt: number; removed: string[] }
+type Saved = {
+  items: Assumption[]
+  nextId: number
+  clearedAt: number
+  removed: string[]
+  owners: Record<string, number>
+  floor: number
+}
 
 const asSaved = (raw: unknown): Saved | undefined => {
   if (raw === undefined || raw === null || typeof raw !== 'object') return undefined
@@ -154,20 +201,41 @@ const asSaved = (raw: unknown): Saved | undefined => {
     nextId: Number.isFinite(Number(v.nextId)) ? Number(v.nextId) : 1,
     clearedAt: Number.isFinite(Number(v.clearedAt)) ? Number(v.clearedAt) : 0,
     removed: Array.isArray(v.removed) ? v.removed.filter(id => typeof id === 'string') : [],
+    owners:
+      v.owners !== null && typeof v.owners === 'object'
+        ? Object.fromEntries(Object.entries(v.owners).filter(([, t]) => Number.isFinite(Number(t))).map(([k, t]) => [k, Number(t)]))
+        : {},
+    floor: Number.isFinite(Number(v.floor)) ? Number(v.floor) : 0,
   }
 }
 
-const idNumber = (id: string): number => Number(id.replace(/\D/g, '')) || 0
+// The number of an id ("A12" or "A12@owner" -> 12).
+const idNumber = (id: string): number => Number(/^A(\d+)/.exec(id)?.[1] ?? 0) || 0
 
-function mergeLists(local: Assumption[], saved: Saved | undefined, gone: Set<string>, cleared: number): Assumption[] {
-  const byId = new Map<string, Assumption>()
-  for (const a of saved?.items ?? []) byId.set(a.id, a)
-  for (const a of local) {
-    const other = byId.get(a.id)
-    if (other === undefined || (a.at ?? 0) >= (other.at ?? 0)) byId.set(a.id, a)
+// One map entry per item. A row saved before items had an owner is the same
+// item as an owned row with its number.
+function mergeLists(local: Assumption[], saved: Saved | undefined, gone: Set<string>, cleared: number, floor = 0): Assumption[] {
+  const byKey = new Map<string, Assumption>()
+  const sameKey = (a: Assumption): string | undefined => {
+    if (byKey.has(uid(a))) return uid(a)
+    for (const [k, b] of byKey) if (b.id === a.id && (b.owner === undefined) !== (a.owner === undefined)) return k
+    return undefined
   }
-  const list = [...byId.values()]
-    .filter(a => !gone.has(a.id) && (cleared === 0 || (a.at ?? 0) > cleared))
+  for (const a of [...(saved?.items ?? []), ...local]) {
+    const k = sameKey(a)
+    const other = k === undefined ? undefined : byKey.get(k)
+    if (other === undefined) {
+      byKey.set(uid(a), a)
+      continue
+    }
+    const newer = (a.at ?? 0) >= (other.at ?? 0) ? a : other
+    const owner = a.owner ?? other.owner
+    byKey.delete(k as string)
+    const item = owner !== undefined ? { ...newer, owner } : newer
+    byKey.set(uid(item), item)
+  }
+  const list = [...byKey.values()]
+    .filter(a => !isGone(a, gone, floor) && (cleared === 0 || (a.at ?? 0) > cleared))
     .sort((a, b) => idNumber(a.id) - idNumber(b.id))
   return capped(list)
 }
@@ -188,14 +256,22 @@ function saveItems($: EngineInterface): Promise<boolean> {
       const key = await currentKey($)
       if (key === null) return false
       const saved = asSaved(await $.store.get(key))
+      const now = await nowMs($)
+      removedFloor = Math.max(removedFloor, saved?.floor ?? 0)
       const cleared = await update($, clearedAt, c => Math.max(c, saved?.clearedAt ?? 0))
-      const gone = await update($, removed, r => [...new Set([...(saved?.removed ?? []), ...r])].slice(-MAX_REMOVED))
+      const gone = await update($, removed, r => trimRemoved([...new Set([...(saved?.removed ?? []), ...r])]))
       const goneSet = new Set(gone)
-      const merged = await update($, items, local => mergeLists(local, saved, goneSet, cleared))
+      const floor = removedFloor
+      const merged = await update($, items, local => mergeLists(local, saved, goneSet, cleared, floor))
       const next = await update($, nextId, n => Math.max(n, saved?.nextId ?? 1))
-      // An empty folder keeps only a few bytes: its next number and its clear time.
-      if (merged.length === 0) await $.store.set(key, { items: [], nextId: next, clearedAt: cleared })
-      else await $.store.set(key, { items: merged, nextId: next, clearedAt: cleared, removed: gone })
+      // Heartbeats: this process's while it holds items of its own; entries a day old leave.
+      const beats = Object.fromEntries(Object.entries(saved?.owners ?? {}).filter(([, t]) => t > now - OWNER_TTL_MS))
+      if (merged.some(a => a.owner === OWNER)) {
+        beats[OWNER] = now
+        lastBeat = now
+      }
+      owners = beats
+      await $.store.set(key, { items: merged, nextId: next, clearedAt: cleared, removed: gone, owners: beats, floor })
       return true
     } catch (err) {
       // The list still holds for this session. Say so once, not on every change.
@@ -223,7 +299,7 @@ async function setItems($: EngineInterface, fn: (list: Assumption[]) => Assumpti
 
 async function forget($: EngineInterface, ids: string[]): Promise<void> {
   if (ids.length === 0) return
-  await update($, removed, r => [...new Set([...r, ...ids])].slice(-MAX_REMOVED))
+  await update($, removed, r => trimRemoved([...new Set([...r, ...ids])]))
 }
 
 // Takes the higher next number from the store before minting, so two sessions
@@ -239,10 +315,21 @@ async function syncNextId($: EngineInterface): Promise<void> {
   }
 }
 
+// While this process holds items of its own, it says it is alive about once a minute.
+async function heartbeat($: EngineInterface): Promise<void> {
+  if ((await nowMs($)) - lastBeat < BEAT_MS) return
+  if (!(await read($, items)).some(a => a.owner === OWNER)) return
+  await saveItems($)
+}
+
 async function clearAll($: EngineInterface): Promise<void> {
+  // Every item there is now (another session's saved ones too) is recorded as
+  // gone, so a stale copy answered later cannot bring it back with a newer time.
+  await saveItems($)
+  const ids = (await read($, items)).map(uid)
   const at = await stamp($)
   await update($, clearedAt, c => Math.max(c, at))
-  await update($, removed, () => [])
+  await forget($, ids)
   await setItems($, () => [])
   await update($, editing, () => null)
   await update($, confirmClear, () => 0)
@@ -352,7 +439,7 @@ async function drawingState($: EngineInterface): Promise<{ isStacked: boolean; l
     const saved = key === null ? undefined : asSaved(await $.store.get(key))
     if (saved !== undefined) {
       const gone = new Set(saved.removed)
-      list = mergeLists([], saved, gone, saved.clearedAt)
+      list = mergeLists([], saved, gone, saved.clearedAt, saved.floor)
     }
   } catch {
     // Draw what the state holds.
@@ -360,9 +447,9 @@ async function drawingState($: EngineInterface): Promise<{ isStacked: boolean; l
   return { isStacked: await hostPresent($), ...(list !== undefined ? { list } : {}) }
 }
 
-const setOne = async ($: EngineInterface, id: string, patch: Partial<Assumption>): Promise<void> => {
+const setOne = async ($: EngineInterface, key: string, patch: Partial<Assumption>): Promise<void> => {
   const at = await stamp($)
-  await setItems($, list => list.map(a => (a.id === id ? { ...a, ...patch, isSent: false, at } : a)))
+  await setItems($, list => list.map(a => (uid(a) === key ? { ...a, ...patch, isSent: false, at } : a)))
   await openPane($)
 }
 
@@ -372,9 +459,17 @@ const setOne = async ($: EngineInterface, id: string, patch: Partial<Assumption>
 const unsent = (list: Assumption[]): Assumption[] =>
   list.filter(a => !a.isSent && (a.verdict !== 'open' || (a.correction ?? '') !== ''))
 
+// The answers this session sends: not another live session's (they go to that Claude).
+const sendable = async ($: EngineInterface, list: Assumption[]): Promise<Assumption[]> => {
+  const now = await nowMs($)
+  return unsent(list).filter(a => mine(a, now))
+}
+
+// A RIGHT carries only the id: the text was written by the model, and the person
+// confirming it should not hand it back as their own words.
 const reviewLine = (a: Assumption): string => {
   const fix = norm(a.correction ?? '')
-  if (a.verdict === 'right' && fix === '') return `- ${a.id} RIGHT: ${a.text}`
+  if (a.verdict === 'right' && fix === '') return `- ${a.id} RIGHT`
   if (fix !== '') return `- ${a.id} ${a.verdict === 'right' ? 'RIGHT, but change' : 'CHANGE'}: ${a.text} -> ${fix}`
   return `- ${a.id} WRONG: ${a.text} (do not keep this; ask me if the right choice is not clear)`
 }
@@ -388,8 +483,8 @@ const sameAnswer = (a: Assumption, b: Assumption): boolean =>
   a.verdict === b.verdict && (a.correction ?? '') === (b.correction ?? '')
 
 const markSent = async ($: EngineInterface, delivered: Assumption[]): Promise<void> => {
-  const isDelivered = (a: Assumption) => delivered.some(d => d.id === a.id && sameAnswer(a, d))
-  const ids = (await read($, items)).filter(isDelivered).map(a => a.id)
+  const isDelivered = (a: Assumption) => delivered.some(d => uid(d) === uid(a) && sameAnswer(a, d))
+  const ids = (await read($, items)).filter(isDelivered).map(uid)
   await forget($, ids)
   await setItems($, list => list.filter(a => !isDelivered(a)))
   await update($, editing, v => (v !== null && ids.includes(v) ? null : v))
@@ -405,8 +500,11 @@ const reviewEntered = async ($: EngineInterface, text: string): Promise<void> =>
   const ids = [...text.matchAll(/^- (A\d+) /gm)].map(m => m[1] ?? '').filter(id => id !== '')
   if (ids.length === 0) return
   const lines = new Set(text.split('\n').map(l => l.trimEnd()))
-  const delivered = (await read($, items)).filter(a => ids.includes(a.id) && lines.has(reviewLine(a)))
-  await update($, queued, q => q.filter(id => !ids.includes(id)))
+  const now = await nowMs($)
+  const named = (await read($, items)).filter(a => ids.includes(a.id) && mine(a, now))
+  const delivered = named.filter(a => lines.has(reviewLine(a)))
+  const keys = named.map(uid)
+  await update($, queued, q => q.filter(id => !keys.includes(id)))
   if (delivered.length > 0) await markSent($, delivered)
 }
 
@@ -417,9 +515,9 @@ const reviewEntered = async ($: EngineInterface, text: string): Promise<void> =>
 const sendNow = async ($: EngineInterface): Promise<void> => {
   await ensureSession($).catch(() => undefined)
   const waitingIds = await read($, queued)
-  const list = unsent(await read($, items)).filter(a => !waitingIds.includes(a.id))
+  const list = (await sendable($, await read($, items))).filter(a => !waitingIds.includes(uid(a)))
   if (list.length === 0) return
-  const ids = list.map(a => a.id)
+  const ids = list.map(uid)
   await update($, queued, q => [...q, ...ids])
   // Whatever happens below, the ids leave the queue again, so no answer is stuck as "waiting".
   let delivered = false
@@ -517,7 +615,9 @@ async function drawSection<E extends ResolveInput>($: EngineInterface, e: E, isS
   const open = list.filter(a => a.verdict === 'open').length
   const queuedIds = await read($, queued)
   const confirm = (await read($, confirmClear)) > 0
-  const waiting = unsent(list).filter(a => !queuedIds.includes(a.id)).length
+  const sendNowList = await sendable($, list)
+  const waiting = sendNowList.filter(a => !queuedIds.includes(uid(a))).length
+  const elsewhere = new Set(unsent(list).filter(a => !sendNowList.includes(a)).map(uid))
   const shown = isStacked ? list.slice(0, STACK_ROWS) : list
   const hidden = list.length - shown.length
 
@@ -545,7 +645,7 @@ async function drawSection<E extends ResolveInput>($: EngineInterface, e: E, isS
     <Box key="assumptions" flexDirection="column" gap={1}>
       {header}
       {shown.map(a => (
-        <Box key={k(`row-${a.id}`)} flexDirection="column">
+        <Box key={k(`row-${rowKey(a)}`)} flexDirection="column">
           <Text
             color={a.verdict === 'right' ? 'success' : a.verdict === 'wrong' ? 'error' : undefined}
             dimColor={a.isSent && a.verdict === 'right'}
@@ -554,24 +654,25 @@ async function drawSection<E extends ResolveInput>($: EngineInterface, e: E, isS
           </Text>
           {a.why !== undefined && <Text dimColor>  why: {a.why}</Text>}
           {(a.correction ?? '') !== '' && <Text color="warning">  change: {a.correction}</Text>}
-          {queuedIds.includes(a.id) && <Text dimColor>  sent, waiting for Claude to finish its turn</Text>}
+          {queuedIds.includes(uid(a)) && <Text dimColor>  sent, waiting for Claude to finish its turn</Text>}
+          {elsewhere.has(uid(a)) && <Text dimColor>  logged in another open session: it goes to that Claude</Text>}
           <Box flexDirection="row" gap={1}>
-            <Button key={k(`right-${a.id}`)} onPress={() => setOne($, a.id, { verdict: 'right' })}>Right</Button>
-            <Button key={k(`wrong-${a.id}`)} onPress={() => setOne($, a.id, { verdict: 'wrong' })}>Wrong</Button>
-            <Button key={k(`edit-${a.id}`)} plain onPress={() => update($, editing, v => (v === a.id ? null : a.id))}>
+            <Button key={k(`right-${rowKey(a)}`)} onPress={() => setOne($, uid(a), { verdict: 'right' })}>Right</Button>
+            <Button key={k(`wrong-${rowKey(a)}`)} onPress={() => setOne($, uid(a), { verdict: 'wrong' })}>Wrong</Button>
+            <Button key={k(`edit-${rowKey(a)}`)} plain onPress={() => update($, editing, v => (v === uid(a) ? null : uid(a)))}>
               Change…
             </Button>
           </Box>
-          {editId === a.id && Input === undefined && <Text dimColor>  Type the change in the prompt box.</Text>}
-          {editId === a.id && Input !== undefined && (
+          {editId === uid(a) && Input === undefined && <Text dimColor>  Type the change in the prompt box.</Text>}
+          {editId === uid(a) && Input !== undefined && (
             <Input
-              key={k(`fix-${a.id}`)}
+              key={k(`fix-${rowKey(a)}`)}
               placeholder="What should it be?"
               submitLabel="save"
               value={a.correction ?? ''}
               autoFocus
               onSubmit={async (value: string) => {
-                await setOne($, a.id, { correction: norm(value).slice(0, 400), verdict: a.verdict === 'open' ? 'wrong' : a.verdict })
+                await setOne($, uid(a), { correction: norm(value).slice(0, 400), verdict: a.verdict === 'open' ? 'wrong' : a.verdict })
                 await update($, editing, () => null)
               }}
             />
@@ -586,9 +687,9 @@ async function drawSection<E extends ResolveInput>($: EngineInterface, e: E, isS
           </Button>
           <Button key={k('all-right')} plain onPress={async () => {
             // Only rows the person can see: hidden ones are never marked unseen.
-            const seen = shown.map(a => a.id)
+            const seen = shown.map(uid)
             const at = await stamp($)
-            await setItems($, l => l.map(a => (a.verdict === 'open' && seen.includes(a.id) ? { ...a, verdict: 'right' as const, isSent: false, at } : a)))
+            await setItems($, l => l.map(a => (a.verdict === 'open' && seen.includes(uid(a)) ? { ...a, verdict: 'right' as const, isSent: false, at } : a)))
             await openPane($)
           }}>{hidden > 0 ? 'All shown are right' : 'All open are right'}</Button>
           {/* Asked: Cancel takes the place "Clear all" had, so a double press cancels. */}
@@ -651,6 +752,7 @@ export const register: Register = on => {
       try {
         $.clock.every(WATCH_MS, () => {
           void ensureSession($).catch(() => undefined)
+          void heartbeat($).catch(() => undefined)
         })
         watching = true
       } catch {
@@ -686,13 +788,13 @@ export const register: Register = on => {
     // update() writes atomically and resolves what it wrote, so two calls at once get two numbers.
     const id = `A${(await update($, nextId, n => n + 1)) - 1}`
     const at = await stamp($)
-    const prevIds = (await read($, items)).map(a => a.id)
+    const prevIds = (await read($, items)).map(uid)
     const after = await update($, items, list => {
-      const one: Assumption = { id, text, verdict: 'open', isSent: false, at, ...(why !== '' ? { why } : {}) }
+      const one: Assumption = { id, text, verdict: 'open', isSent: false, at, owner: OWNER, ...(why !== '' ? { why } : {}) }
       return capped([...list, one])
     })
     // Rows the cap pushed out stay out of the saved list too.
-    await forget($, prevIds.filter(old => !after.some(a => a.id === old)))
+    await forget($, prevIds.filter(old => !after.some(a => uid(a) === old)))
     await saveItems($)
     await openPane($, false, `New assumption ${id}.`)
     return { result: `Logged as ${id}. Keep working; the person may correct it later.` }
@@ -711,10 +813,13 @@ export const register: Register = on => {
       }
       return result
     }
+    // A slash command (/model, /clear, a skill) is not a message Claude reads
+    // as-is: the answers wait for the next prompt.
+    if (e.command !== undefined) return next(e)
     const waitingIds = await read($, queued)
-    const list = unsent(await read($, items)).filter(a => !waitingIds.includes(a.id))
+    const list = (await sendable($, await read($, items))).filter(a => !waitingIds.includes(uid(a)))
     if (list.length === 0) return next(e)
-    const ids = list.map(a => a.id)
+    const ids = list.map(uid)
     await update($, queued, q => [...q, ...ids])
     try {
       const result = await next({ ...e, context: [...(e.context ?? []), reviewText(list)] })

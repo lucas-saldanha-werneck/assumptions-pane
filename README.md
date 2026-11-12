@@ -42,8 +42,11 @@ When you press Send, Claude gets a message like this:
 ```
 Assumption review:
 - A1 CHANGE: The table sorts by date, newest first -> Sort by name
-- A2 RIGHT: Prices are shown in USD
+- A2 RIGHT
 ```
+
+A RIGHT carries only the number: the text was written by Claude, so it is not sent back as if
+you had said it.
 
 An item marked Wrong with no change typed is sent as
 `- A1 WRONG: <text> (do not keep this; ask me if the right choice is not clear)`.
@@ -74,8 +77,14 @@ also loads in the desktop app's local Code sessions.
   Each folder has its own list.
 - Two sessions open in the same folder share the list: each save merges with what the other
   session saved, so neither wipes the other's items or answers, and numbers are not handed out
-  twice.
-- Clear all empties the list for that folder, in every session. It asks first: press Clear all, then
+  twice. Each item remembers the session that logged it: if two sessions hand out the same number
+  at the same moment, both items are kept. Your answer to an item goes to the Claude that logged
+  it while that session is open (the row says so); once that session has been gone for 3 minutes
+  (it saves a heartbeat once a minute), any session in the folder sends it.
+- A slash command (`/model`, `/clear`, a skill) never carries your answers; they go with your
+  next prompt.
+- Clear all empties the list for that folder, in every session, and records the cleared numbers so
+  a session that still shows an old item cannot bring it back. It asks first: press Clear all, then
   Yes, clear all. While it asks, Cancel sits where Clear all was, so a double press cancels. The
   question goes away by itself after 5 seconds. `/assumptions clear` empties it without asking.
 - Right and Wrong mark an item. Change… opens a text field for the fix. All open are right marks
