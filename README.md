@@ -1,8 +1,22 @@
 # assumptions-pane
 
+[![CI](https://github.com/lucas-saldanha-werneck/assumptions-pane/actions/workflows/test.yml/badge.svg)](https://github.com/lucas-saldanha-werneck/assumptions-pane/actions/workflows/test.yml)
+[![License](https://img.shields.io/github/license/lucas-saldanha-werneck/assumptions-pane)](LICENSE)
+[![Version](https://img.shields.io/badge/version-0.3.7-blue)](CHANGELOG.md)
+
 A Claude Code mod: a side pane that lists each assumption Claude makes while it works, so you can
 mark it right or wrong and send corrections in one message. Claude does not stop to ask, and
 it does not guess silently either.
+
+[![assumptions-pane demo: tap to open the video](https://github.com/user-attachments/assets/3dc2d729-8aae-4bab-b8af-7f08c2ed2fce)](https://lucas-saldanha-werneck.github.io/assumptions-pane/demo.mp4)
+
+<table>
+<tr>
+<td align="center"><img src="https://github.com/user-attachments/assets/87d9b146-cacf-4263-bc1e-e335f7fb5158" alt="The assumptions pane in a terminal, marking one right and one wrong" width="320"><br>In the terminal</td>
+<td align="center"><img src="https://github.com/user-attachments/assets/02b4c1e2-aa04-426b-9bf7-08bc683c7b89" alt="The assumptions pane in the Claude desktop app" width="320"><br>In the desktop app</td>
+<td align="center"><img src="https://github.com/user-attachments/assets/65ef80d8-32e8-4450-a2d8-c848754eae07" alt="Summary: no silent guesses, no interruptions" width="320"><br>The idea in short</td>
+</tr>
+</table>
 
 Each time Claude picks something you did not state (a default value, a file name, one option over
 another), it logs it in one line and keeps working. This sketch shows roughly how the pane looks in
@@ -216,3 +230,7 @@ The idea comes from the "Assumption Checker" mod in the AI LABS video [Claude Mo
 MIT. See `LICENSE`.
 
 Built with Claude Code
+
+## Security
+
+See [SECURITY.md](SECURITY.md) for how to report a vulnerability and what this plugin accesses.
