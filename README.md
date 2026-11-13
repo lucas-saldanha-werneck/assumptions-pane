@@ -3,6 +3,7 @@
 [![CI](https://github.com/lucas-saldanha-werneck/assumptions-pane/actions/workflows/test.yml/badge.svg)](https://github.com/lucas-saldanha-werneck/assumptions-pane/actions/workflows/test.yml)
 [![License](https://img.shields.io/github/license/lucas-saldanha-werneck/assumptions-pane)](LICENSE)
 [![Version](https://img.shields.io/badge/version-0.3.7-blue)](CHANGELOG.md)
+[![plugin score (proposal)](https://img.shields.io/badge/plugin%20score%20(proposal)-94.2%20A-brightgreen)](https://github.com/NVIDIA/SkillEvaluator/issues/508)
 
 A Claude Code mod: a side pane that lists each assumption Claude makes while it works, so you can
 mark it right or wrong and send corrections in one message. Claude does not stop to ask, and
