@@ -12,7 +12,7 @@ it does not guess silently either.
 
 <table>
 <tr>
-<td align="center"><img src="https://github.com/user-attachments/assets/87d9b146-cacf-4263-bc1e-e335f7fb5158" alt="The assumptions pane in a terminal, marking one right and one wrong" width="320"><br>In the terminal</td>
+<td align="center"><img src="https://github.com/user-attachments/assets/87d9b146-cacf-4263-bc1e-e335f7fb5158" alt="The assumptions pane in a terminal, one marked right and one still open" width="320"><br>In the terminal</td>
 <td align="center"><img src="https://github.com/user-attachments/assets/02b4c1e2-aa04-426b-9bf7-08bc683c7b89" alt="The assumptions pane in the Claude desktop app" width="320"><br>In the desktop app</td>
 <td align="center"><img src="https://github.com/user-attachments/assets/65ef80d8-32e8-4450-a2d8-c848754eae07" alt="Summary: no silent guesses, no interruptions" width="320"><br>The idea in short</td>
 </tr>

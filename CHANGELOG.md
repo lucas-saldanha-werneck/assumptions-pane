@@ -4,23 +4,26 @@ Versions are the `version` in `.claude-plugin/plugin.json`. Newest first.
 
 ## 0.3.7 (2026-11-13)
 
-- Add README Examples section and bump patch version.
+- README: add an Examples section.
 
 ## 0.3.6 (2026-11-12)
 
-- Fix audit findings: item owners, slash commands, removed ids, RIGHT line.
+- Slash commands no longer carry or consume pending answers.
+- Each item records the session that logged it; an answer goes back to that session while it is alive.
+- Removed and cleared ids stay out, so a stale copy cannot bring them back.
+- A RIGHT line carries only the id, not the model-written text.
 
 ## 0.3.5 (2026-11-11)
 
-- Point to the catalog repo's new name, lucas-tools.
+- Point to the catalog repo's new name, `lucas-tools`.
 
 ## 0.3.4 (2026-11-11)
 
-- Rename the marketplace to lucas-tools.
+- Catalog renamed to `lucas-tools`.
 
 ## 0.3.3 (2026-11-09)
 
-- Polish: one-line description, catalog install, README headings.
+- One-line description, catalog install steps, README headings.
 
 ## 0.3.2 (2026-11-09)
 
@@ -37,11 +40,12 @@ Versions are the `version` in `.claude-plugin/plugin.json`. Newest first.
 ## 0.2.1 (2026-11-09)
 
 - Reload the list after a real /clear; side-stack presence from /stack alone.
+- Two sessions in one folder merge the saved list by id instead of overwriting it.
+- Clear all keeps its slot; side-stack counts as present only with its live /stack command (protocol v2).
 
 ## 0.2.0 (2026-11-09)
 
 - Saved list per folder, Clear all, side-stack support.
-- Review fixes: shared store merge, Clear all slot, stack presence (v2).
 
 ## 0.1.2 (2026-11-08)
 
@@ -54,4 +58,3 @@ Versions are the `version` in `.claude-plugin/plugin.json`. Newest first.
 ## 0.1.0 (2026-11-08)
 
 - Side pane for the assumptions Claude logs.
-
