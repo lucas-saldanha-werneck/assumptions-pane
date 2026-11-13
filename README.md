@@ -104,6 +104,17 @@ also loads in the desktop app's local Code sessions.
 
 There are no settings and nothing else to install.
 
+## Examples
+
+- Claude builds a table and picks a sort order you did not state. It calls
+  `log_assumption({ "assumption": "The table sorts by date, newest first" })`, keeps working, and the
+  pane lists "A1" for you to mark.
+- You open the list at any width with `/assumptions`, press Right on A1, Wrong with a change on A2
+  ("Sort by name"), then Send. Claude gets `Assumption review:` with `- A1 RIGHT` and
+  `- A2 CHANGE: ... -> Sort by name`, and applies the correction before it goes on.
+- You type a normal prompt while answers are marked but not sent: they go along with it.
+- `/assumptions clear` empties the list for the folder without asking.
+
 ## Works alone or inside side-stack
 
 The desktop app and the terminal show separate panes as tabs, one at a time. If you use more than
