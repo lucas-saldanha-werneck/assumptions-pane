@@ -9,6 +9,8 @@ export type Assumption = {
   isSent: boolean
   // Time of the last change (ms); a merge with another session's save keeps the newer.
   at?: number
+  // When it was logged (ms); drawn under the text so old rows stand out.
+  createdAt?: number
   // The process (session) that logged it; its answer goes to that Claude while it runs.
   owner?: string
 }

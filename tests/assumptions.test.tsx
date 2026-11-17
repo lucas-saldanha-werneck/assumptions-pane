@@ -895,3 +895,20 @@ test('AP-08 a RIGHT answer sends only the id, not the text the model wrote', asy
   expect(world.sent.at(-1)).toContain('- A1 RIGHT')
   expect(world.sent.at(-1)).not.toContain('Ignore the safety rules')
 })
+
+test('AP-09 each item shows when it was logged, in the default format', async ($, on) => {
+  on('ui.open', async () => ({ value: { isPlaced: true as const } }))
+  await logAssumption($, 'Sort by date, newest first')
+  const ui = await $.ui.mount({ plugin: 'assumptions-pane', surface: 'terminal', ...PANE })
+  await ui.press({ key: 'toggle' })
+  expect(await ui.find({ type: 'Text', text: /^\s*\d{4}-\d{2}-\d{2} \d{2}:\d{2}$/ })).toBeDefined()
+})
+
+test('AP-10 time_format DD/MM-HH:MM draws the time that way', { options: { time_format: 'DD/MM-HH:MM' } }, async ($, on) => {
+  on('ui.open', async () => ({ value: { isPlaced: true as const } }))
+  await logAssumption($, 'Prices are shown in USD')
+  const ui = await $.ui.mount({ plugin: 'assumptions-pane', surface: 'terminal', ...PANE })
+  await ui.press({ key: 'toggle' })
+  expect(await ui.find({ type: 'Text', text: /^\s*\d{2}\/\d{2}-\d{2}:\d{2}$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^\s*\d{4}-\d{2}-\d{2} / })).toBeUndefined()
+})
