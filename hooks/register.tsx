@@ -60,10 +60,26 @@ const toolName = ($: EngineInterface, name: string): string => `mcp__${$.plugin.
 // One line, single spaces: a review line then matches the prompt it entered in.
 const norm = (s: string): string => s.replace(/\s+/g, ' ').trim()
 
+// When a row was logged, in this computer's time zone, in the chosen format.
+const TIME_FORMATS = ['YYYY-MM-DD HH:MM', 'DD/MM-HH:MM', 'MM/DD-HH:MM'] as const
+type TimeFormat = (typeof TIME_FORMATS)[number]
+export function formatTime(ms: number, format: TimeFormat): string {
+  const d = new Date(ms)
+  const p = (n: number): string => String(n).padStart(2, '0')
+  const day = p(d.getDate())
+  const month = p(d.getMonth() + 1)
+  const clock = `${p(d.getHours())}:${p(d.getMinutes())}`
+  if (format === 'DD/MM-HH:MM') return `${day}/${month}-${clock}`
+  if (format === 'MM/DD-HH:MM') return `${month}/${day}-${clock}`
+  return `${d.getFullYear()}-${month}-${day} ${clock}`
+}
+
 // Module values: none of them is drawn from. They outlive a /clear (the process
 // goes on), which is what lastKey is for.
 let lastKey: string | null = null
 let lastStamp = 0
+// The time_format option (userConfig), set when the module loads.
+let timeFormat: TimeFormat = 'YYYY-MM-DD HH:MM'
 let saving: Promise<void> = Promise.resolve()
 let saveFailed = false
 // Whether side-stack's pane is up, as far as this plugin has seen.
@@ -652,6 +668,7 @@ async function drawSection<E extends ResolveInput>($: EngineInterface, e: E, isS
           >
             {a.verdict === 'right' ? '✓' : a.verdict === 'wrong' ? '✗' : '?'} {a.id} {a.text}
           </Text>
+          {(a.createdAt ?? a.at) !== undefined && <Text dimColor>  {formatTime(a.createdAt ?? a.at ?? 0, timeFormat)}</Text>}
           {a.why !== undefined && <Text dimColor>  why: {a.why}</Text>}
           {(a.correction ?? '') !== '' && <Text color="warning">  change: {a.correction}</Text>}
           {queuedIds.includes(uid(a)) && <Text dimColor>  sent, waiting for Claude to finish its turn</Text>}
@@ -702,7 +719,9 @@ async function drawSection<E extends ResolveInput>($: EngineInterface, e: E, isS
   )
 }
 
-export const register: Register = on => {
+export const register: Register = (on, options) => {
+  const chosen = String((options as Record<string, unknown> | undefined)?.time_format ?? '')
+  timeFormat = (TIME_FORMATS as readonly string[]).includes(chosen) ? (chosen as TimeFormat) : 'YYYY-MM-DD HH:MM'
   on('session.start', async ($, e, next) => {
     const key = `assumptions:${e.cwd}`
     lastKey = key
@@ -790,7 +809,7 @@ export const register: Register = on => {
     const at = await stamp($)
     const prevIds = (await read($, items)).map(uid)
     const after = await update($, items, list => {
-      const one: Assumption = { id, text, verdict: 'open', isSent: false, at, owner: OWNER, ...(why !== '' ? { why } : {}) }
+      const one: Assumption = { id, text, verdict: 'open', isSent: false, at, createdAt: at, owner: OWNER, ...(why !== '' ? { why } : {}) }
       return capped([...list, one])
     })
     // Rows the cap pushed out stay out of the saved list too.

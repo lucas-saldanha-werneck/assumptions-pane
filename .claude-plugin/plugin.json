@@ -1,6 +1,6 @@
 {
   "name": "assumptions-pane",
-  "version": "0.3.7",
+  "version": "0.4.0",
   "description": "A side pane that lists each assumption Claude makes, so you can mark it right or wrong.",
   "author": {
     "name": "Lucas Saldanha Werneck",
@@ -9,6 +9,24 @@
   "homepage": "https://github.com/lucas-saldanha-werneck/assumptions-pane",
   "repository": "https://github.com/lucas-saldanha-werneck/assumptions-pane",
   "license": "MIT",
-  "keywords": ["mod", "pane", "assumptions", "review"],
-  "types": "./types/index.d.ts"
+  "keywords": [
+    "mod",
+    "pane",
+    "assumptions",
+    "review"
+  ],
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "time_format": {
+      "type": "string",
+      "title": "Time format",
+      "description": "How each assumption's logged time shows under its text, in this computer's time zone. Default 2026-11-25 18:02.",
+      "options": [
+        "YYYY-MM-DD HH:MM",
+        "DD/MM-HH:MM",
+        "MM/DD-HH:MM"
+      ],
+      "default": "YYYY-MM-DD HH:MM"
+    }
+  }
 }

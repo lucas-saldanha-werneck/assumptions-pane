@@ -27,9 +27,11 @@ a terminal after you press Show. It is not a screenshot:
 Assumptions (2 open)
 2 assumptions, 2 open  Hide
 ? A1 The table sorts by date, newest first
+  2026-11-25 18:02
   why: most recent entries matter most
   [ Right ] [ Wrong ] Change…
 ? A2 Prices are shown in USD
+  2026-11-25 18:05
   [ Right ] [ Wrong ] Change…
 [ Nothing to send ] All open are right Clear all
 ```
@@ -111,13 +113,18 @@ also loads in the desktop app's local Code sessions.
 - Answered items leave the list once Claude has them. Open items stay. If you change an answer
   while the review waits, the new answer stays in the pane so you can send it.
 - Numbers keep counting after a clear and after a reload, so "A3" always means one item.
+- Each item shows, in grey under its text, when it was logged, in this computer's time zone, so
+  old items stand apart from current ones. Items saved by an older version show the time of their
+  last change.
 - Line breaks and runs of spaces in an assumption or a change are saved as one space.
 - If the list cannot be saved (for example, the plugin store is full), the mod says so once and the
   list keeps working for that session.
 - A review leaves the pane as soon as it enters the chat, even when the app does not report back
   that the message was sent.
 
-There are no settings and nothing else to install.
+One setting, in `/config`: **Time format** (`time_format`) picks how that time shows:
+`YYYY-MM-DD HH:MM` (default, `2026-11-25 18:02`), `DD/MM-HH:MM` (`25/11-18:02`) or
+`MM/DD-HH:MM` (`11/25-18:02`). Nothing else to install.
 
 ## Examples
 

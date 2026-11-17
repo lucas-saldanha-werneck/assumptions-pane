@@ -2,6 +2,11 @@
 
 Versions are the `version` in `.claude-plugin/plugin.json`. Newest first.
 
+## 0.4.0 (2026-11-17)
+
+- Each item shows when it was logged, in grey under its text, so old items stand apart from current ones.
+- New setting `time_format`: `YYYY-MM-DD HH:MM` (default), `DD/MM-HH:MM` or `MM/DD-HH:MM`.
+
 ## 0.3.7 (2026-11-13)
 
 - README: add an Examples section.
