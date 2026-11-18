@@ -13,6 +13,8 @@ export type Assumption = {
   createdAt?: number
   // The process (session) that logged it; its answer goes to that Claude while it runs.
   owner?: string
+  // Told to the person on the phone (Remote Control), so it is not told again.
+  told?: boolean
 }
 
 declare module 'claude-code' {
@@ -37,6 +39,8 @@ declare module 'claude-code' {
       stacked: boolean
       // The session id the list was loaded under (gone with the state on a /clear).
       loadedFor: string | null
+      showStack: number
     }
+    'side-stack': { shownBy: Record<string, number> }
   }
 }

@@ -1,4 +1,6 @@
-import { expect, mock, test } from 'claude-code/testing'
+import { describe, expect, mock, test } from 'claude-code/testing'
+
+import { parsePhoneReply } from '../hooks/phone'
 import type { Engine } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
@@ -26,7 +28,7 @@ test('logs an assumption, marks it, and sends the review', async ($, on) => {
   expect(JSON.stringify(logged)).toContain('A1')
   for (const surface of ['terminal', 'desktop'] as const) {
     const ui = await $.ui.mount({ plugin: 'assumptions-pane', surface, ...PANE })
-    if (surface === 'terminal') expect(await ui.find({ type: 'Text', text: /1 assumptions/ })).toBeDefined()
+    if (surface === 'terminal') expect(await ui.find({ type: 'Text', text: 'Assumptions · 1 open' })).toBeDefined()
     if (surface === 'terminal') {
       await ui.press({ key: 'toggle' })
       await ui.press({ key: 'wrong-A1' })
@@ -35,7 +37,9 @@ test('logs an assumption, marks it, and sends the review', async ($, on) => {
       await ui.press({ key: 'send' })
       expect(sent.at(-1)).toContain('A1 CHANGE: Sort by date, newest first -> Sort by name')
       expect(await ui.find({ key: 'right-A1' })).toBeUndefined()
-      expect(await ui.find({ type: 'Text', text: /No assumptions yet/ })).toBeDefined()
+      // Empty: one heading line, nothing to show or hide.
+      expect(await ui.find({ type: 'Text', text: 'Assumptions · 0' })).toBeDefined()
+      expect(await ui.find({ key: 'toggle' })).toBeUndefined()
       await logAssumption($, 'Use 21 columns')
     } else {
       expect(await ui.find({ key: 'right-A2' })).toBeDefined()
@@ -55,7 +59,7 @@ test('a review that does not enter stays in the pane', async ($, on) => {
   await ui.press({ key: 'send' })
   expect(await ui.find({ key: 'right-A1' })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /A1 Two T4 fields/ })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: /waiting for Claude/ })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /^  waiting$/ })).toBeUndefined()
   await ui.unmount()
 })
 
@@ -229,7 +233,7 @@ async function boot(
     host?: boolean
     hostCommand?: boolean
     ownPaneUp?: boolean
-    submit?: 'enter' | 'hang'
+    submit?: 'enter' | 'hang' | 'drop'
     storeBroken?: boolean
     /** false: no session.start under this session id (fresh state, as after a /clear). */
     start?: boolean
@@ -253,6 +257,8 @@ async function boot(
   on('session.id', () => ({ value: world.session.id }) as never)
   on('session.cwd', () => ({ value: '/tmp' }) as never)
   let ownPaneUp = options.ownPaneUp ?? false
+  // side-stack's pane, opened by its /stack command.
+  let stackUp = false
   let getFails = options.storeGetFails ?? 0
   on('store.get', (_$, e) => {
     if (getFails > 0) {
@@ -281,6 +287,7 @@ async function boot(
   )
   on('command.run', { command: 'stack' }, () => {
     world.stackRuns++
+    stackUp = true
     return { text: 'Stack pane opened.' }
   })
   on('session.start', (_$, e) => ({ cwd: e.cwd }))
@@ -298,7 +305,7 @@ async function boot(
     if (e.id === 'assumptions') ownPaneUp = true
     return { value: { isPlaced: true as const } }
   })
-  on('ui.panes', async () => ({ value: (ownPaneUp ? [{ id: 'assumptions' }] : []) as never }))
+  on('ui.panes', async () => ({ value: [...(ownPaneUp ? [{ id: 'assumptions' }] : []), ...(stackUp ? [{ id: 'side-stack' }] : [])] as never }))
   on('ui.close', async (_$, e) => {
     world.closed.push(e.id)
     if (e.id === 'assumptions') ownPaneUp = false
@@ -308,6 +315,7 @@ async function boot(
     world.sent.push(e.text)
     world.contexts.push([...(e.context ?? [])])
     if (options.submit === 'hang') return new Promise(() => undefined) as never
+    if (options.submit === 'drop') return { drop: 'blocked by a hook' } as never
     return { text: e.text }
   })
   if (options.start !== false) await $.session.start({ cwd: '/tmp', surface: 'terminal', isInteractive: true })
@@ -316,6 +324,9 @@ async function boot(
 
 type Saved = { items: { id: string; text: string; verdict: string; correction?: string }[]; nextId: number; clearedAt?: number }
 const savedAt = (world: World, key = 'assumptions:/tmp'): Saved => world.kept[key] as Saved
+
+/** The texts as a reader sees the section: the heading once (not its dim part or its divider line). */
+const sectionTexts = (texts: string[]): string[] => texts.filter(t => !t.startsWith(' · ') && !/^─+$/.test(t))
 
 // Buttons drawn in side-stack's pane belong to this plugin.
 const AP = 'assumptions-pane'
@@ -416,7 +427,7 @@ for (const surface of SURFACES) {
     await $.turn.start({ turnId: 't2', text: `The assumptions-pane plugin sent a message: ${world.sent.at(-1)}` })
     expect(await ui.find({ type: 'Text', text: /Turn off the notice/ })).toBeUndefined()
     expect(await ui.find({ type: 'Text', text: /A60 Use tabs/ })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: /waiting for Claude/ })).toBeUndefined()
+    expect(await ui.find({ type: 'Text', text: /^  waiting$/ })).toBeUndefined()
     expect(savedAt(world).items.map(a => a.id)).toEqual(['A60'])
     await ui.unmount()
   })
@@ -447,7 +458,7 @@ for (const surface of SURFACES) {
     expect(world.opened).not.toContain('assumptions')
     const ui = await $.ui.mount({ ...STACK, surface })
     const texts = (await ui.findAll({ type: 'Text' })).map(t => t.text)
-    expect(texts[0]).toBe('Assumptions')
+    expect(texts[0]).toMatch(/^Assumptions · \d+ open$/)
     // next(e) is drawn too, beneath the section.
     expect(texts.at(-1)).toBe('NEXT-SECTION')
     // The buttons work inside the stack, with keys that do not clash with other sections.
@@ -494,7 +505,7 @@ for (const surface of SURFACES) {
     expect((await ui.findAll({ type: 'Text' })).map(t => t.text)).toEqual(['NEXT-SECTION'])
     await ui.unmount()
     const own = await ownPane($, surface)
-    expect(await own.find({ type: 'Text', text: /1 assumptions, 1 open/ })).toBeDefined()
+    expect(await own.find({ type: 'Text', text: /^Assumptions · 1 open$/ })).toBeDefined()
     await own.unmount()
   })
 }
@@ -619,7 +630,7 @@ for (const surface of SURFACES) {
     const ui = await $.ui.mount({ ...STACK, surface })
     await ui.press({ plugin: AP, key: 'as-toggle' })
     const texts = (await ui.findAll({ type: 'Text' })).map(t => t.text)
-    expect(texts[0]).toBe('Assumptions')
+    expect(texts[0]).toMatch(/^Assumptions · \d+ open$/)
     expect(texts.join('|')).toContain('A1 teste')
     expect(texts.join('|')).toContain('A2 outra')
     expect(texts.at(-1)).toBe('NEXT-SECTION')
@@ -635,8 +646,8 @@ for (const surface of SURFACES) {
     // Before any prompt, the drawing reads the store.
     const early = await $.ui.mount({ ...STACK, surface })
     const earlyTexts = (await early.findAll({ type: 'Text' })).map(t => t.text)
-    expect(earlyTexts[0]).toBe('Assumptions')
-    expect(earlyTexts).toContain('1, 1 open')
+    expect(earlyTexts[0]).toMatch(/^Assumptions · \d+ open$/)
+    expect(earlyTexts[0]).toBe('Assumptions · 1 open')
     expect(earlyTexts.at(-1)).toBe('NEXT-SECTION')
     await early.unmount()
     // A prompt and its turn load it into state; buttons and review work.
@@ -660,7 +671,7 @@ for (const surface of SURFACES) {
     const world = await boot($, on, { stored, start: false })
     world.session.id = 's2-alone'
     const early = await ownPane($, surface)
-    expect(await early.find({ type: 'Text', text: /1 assumptions, 1 open/ })).toBeDefined()
+    expect(await early.find({ type: 'Text', text: /^Assumptions · 1 open$/ })).toBeDefined()
     await early.unmount()
     await $.turn.start({ turnId: 't2', text: 'go on' })
     expect(world.opened).toContain('assumptions')
@@ -677,7 +688,7 @@ test('side-stack counts as running from its /stack command alone (its flag is go
   await logAssumption($, 'Sort by date')
   expect(world.opened).not.toContain('assumptions')
   const ui = await $.ui.mount({ ...STACK, surface: 'terminal' })
-  expect((await ui.findAll({ type: 'Text' })).map(t => t.text)[0]).toBe('Assumptions')
+  expect((await ui.findAll({ type: 'Text' })).map(t => t.text)[0]).toMatch(/^Assumptions · \d+ open$/)
   await ui.unmount()
 })
 
@@ -704,7 +715,7 @@ for (const surface of SURFACES) {
     await logAssumption($, 'Sort by date')
     const ui = await $.ui.mount({ ...STACK, surface })
     const texts = (await ui.findAll({ type: 'Text' })).map(t => t.text)
-    expect(texts).toEqual(['EARLIER-SECTION', 'Assumptions', '1, 1 open', 'LATER-SECTION'])
+    expect(sectionTexts(texts)).toEqual(['EARLIER-SECTION', 'Assumptions · 1 open', 'LATER-SECTION'])
     // The buttons work in that place too.
     await ui.press({ plugin: AP, key: 'as-toggle' })
     await ui.press({ plugin: AP, key: 'as-wrong-A1' })
@@ -713,7 +724,7 @@ for (const surface of SURFACES) {
     const after = (await ui.findAll({ type: 'Text' })).map(t => t.text)
     expect(after[0]).toBe('EARLIER-SECTION')
     expect(after.at(-1)).toBe('LATER-SECTION')
-    expect(after.filter(t => t === 'Assumptions').length).toBe(1)
+    expect(after.filter(t => t.startsWith('Assumptions')).length).toBe(1)
     await ui.unmount()
   })
 
@@ -723,7 +734,7 @@ for (const surface of SURFACES) {
     await logAssumption($, 'Sort by date')
     const ui = await $.ui.mount({ ...STACK, surface })
     const texts = (await ui.findAll({ type: 'Text' })).map(t => t.text)
-    expect(texts).toEqual(['Assumptions', '1, 1 open', 'NEXT-SECTION'])
+    expect(sectionTexts(texts)).toEqual(['Assumptions · 1 open', 'NEXT-SECTION'])
     await ui.unmount()
   })
 }
@@ -742,8 +753,8 @@ for (const surface of SURFACES) {
     await $.turn.start({ turnId: 't2', text: 'go on' })
     const ui = await $.ui.mount({ ...STACK, surface })
     const texts = (await ui.findAll({ type: 'Text' })).map(t => t.text)
-    expect(texts[0]).toBe('Assumptions')
-    expect(texts).toContain('2, 2 open')
+    expect(texts[0]).toMatch(/^Assumptions · \d+ open$/)
+    expect(texts[0]).toBe('Assumptions · 2 open')
     await ui.press({ plugin: AP, key: 'as-toggle' })
     expect(await ui.find({ type: 'Text', text: /A2 outra/ })).toBeDefined()
     await ui.unmount()
@@ -779,8 +790,8 @@ for (const surface of SURFACES) {
     await $.turn.start({ turnId: 't2', text: 'go on' })
     const ui = await $.ui.mount({ ...STACK, surface })
     const texts = (await ui.findAll({ type: 'Text' })).map(t => t.text)
-    expect(texts[0]).toBe('Assumptions')
-    expect(texts).toContain('2, 2 open')
+    expect(texts[0]).toMatch(/^Assumptions · \d+ open$/)
+    expect(texts[0]).toBe('Assumptions · 2 open')
     await ui.unmount()
   })
 }
@@ -911,4 +922,116 @@ test('AP-10 time_format DD/MM-HH:MM draws the time that way', { options: { time_
   await ui.press({ key: 'toggle' })
   expect(await ui.find({ type: 'Text', text: /^\s*\d{2}\/\d{2}-\d{2}:\d{2}$/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /^\s*\d{4}-\d{2}-\d{2} / })).toBeUndefined()
+})
+
+// ---- On the phone (Remote Control) ------------------------------------------
+
+describe('phone replies', () => {
+  test('a bare "ok" (or "todas certas", "all right") marks every listed assumption right', () => {
+    for (const reply of ['ok', 'OK!', 'todas certas', 'all right', ' Tudo certo. ']) {
+      expect(parsePhoneReply(reply, ['A46', 'A47'])).toEqual([
+        { id: 'A46', verdict: 'right' },
+        { id: 'A47', verdict: 'right' },
+      ])
+    }
+  })
+
+  test('"A46 errado: why" marks that one wrong with the reason; "A47 certo" marks it right', () => {
+    expect(parsePhoneReply('A46 errado: a página mostra só o resumo', ['A46', 'A47'])).toEqual([
+      { id: 'A46', verdict: 'wrong', why: 'a página mostra só o resumo' },
+    ])
+    expect(parsePhoneReply('A46 wrong - use the name. A47 certo', ['A46', 'A47'])).toEqual([
+      { id: 'A46', verdict: 'wrong', why: 'use the name.' },
+      { id: 'A47', verdict: 'right' },
+    ])
+    expect(parsePhoneReply('A3 right, A4 wrong', [])).toEqual([
+      { id: 'A3', verdict: 'right' },
+      { id: 'A4', verdict: 'wrong' },
+    ])
+  })
+
+  test('a reply that names no assumption marks nothing', () => {
+    expect(parsePhoneReply('can you also add a footer?', ['A46'])).toEqual([])
+    expect(parsePhoneReply('ok, and add a footer too', ['A46'])).toEqual([])
+  })
+})
+
+const phonePrompt = ($: Engine, text: string, kind = 'bridge') => $.prompt.submit({ text, origin: { kind } } as never)
+const phoneContexts = (world: World): string[] => world.contexts.at(-1)?.filter(c => c.includes('assumptions-pane plugin')) ?? []
+
+test('on the phone, open assumptions are told once, with the next phone prompt', async ($, on) => {
+  const world = await boot($, on)
+  await logAssumption($, 'The page shows the polish')
+  await phonePrompt($, 'como ficou?')
+  const told = phoneContexts(world)
+  expect(told.length).toBe(1)
+  expect(told[0]).toContain('- A1 The page shows the polish')
+  expect(told[0]).toContain('END of your reply')
+  // Told already: the next phone prompt does not list it again.
+  await phonePrompt($, 'e agora?')
+  expect(phoneContexts(world)).toEqual([])
+  // The pane keeps it, marked open.
+  expect(savedAt(world).items.map(a => `${a.id} ${a.verdict}`)).toEqual(['A1 open'])
+})
+
+test('a prompt that does not come from the phone gets no assumptions context', async ($, on) => {
+  const world = await boot($, on)
+  await logAssumption($, 'Sort by date')
+  await phonePrompt($, 'typed at the desk', 'composer')
+  expect(phoneContexts(world)).toEqual([])
+  await phonePrompt($, 'typed in the app', 'sdk')
+  expect(phoneContexts(world)).toEqual([])
+})
+
+test('an assumption logged during a phone-driven turn is told by that turn, not again later', async ($, on) => {
+  const world = await boot($, on)
+  await phonePrompt($, 'build it')
+  const logged = JSON.stringify(await logAssumption($, 'Use 21 columns'))
+  expect(logged).toContain('END of your final reply of this turn')
+  await phonePrompt($, 'next')
+  expect(phoneContexts(world)).toEqual([])
+})
+
+test('the phone reply marks the assumptions in the same list the pane shows', async ($, on) => {
+  const world = await boot($, on)
+  await logAssumption($, 'First')
+  await logAssumption($, 'Second')
+  await logAssumption($, 'Third')
+  await phonePrompt($, 'status?')
+  await phonePrompt($, 'A2 errado: use the other one')
+  const after = savedAt(world).items.map(a => `${a.id} ${a.verdict}${a.correction !== undefined ? ` ${a.correction}` : ''}`)
+  expect(after).toEqual(['A1 open', 'A2 wrong use the other one', 'A3 open'])
+  expect(phoneContexts(world).join('\n')).toContain('A2 CHANGE: Second -> use the other one')
+  await phonePrompt($, 'ok')
+  expect(savedAt(world).items.map(a => `${a.id} ${a.verdict}`)).toEqual(['A1 right', 'A2 wrong', 'A3 right'])
+  // Marked from the phone: nothing left for the pane's Send.
+  const ui = await $.ui.mount({ plugin: 'assumptions-pane', surface: 'terminal', ...PANE })
+  await ui.press({ key: 'toggle' })
+  expect(await ui.find({ key: 'send' })).toBeUndefined()
+  await ui.unmount()
+})
+
+// One render path for the terminal and one for the apps (stack-guest.tsx, lookOf):
+// today both draw the same section, and each must draw.
+test('the section draws on the terminal and on the desktop app, in the Stack pane and alone', async ($, on) => {
+  sectionBeneath(on)
+  await boot($, on, { host: true })
+  await logAssumption($, 'Sort by date')
+  for (const surface of ['terminal', 'desktop'] as const) {
+    const ui = await $.ui.mount({ ...STACK, surface })
+    expect(await ui.find({ key: 'side-stack:assumptions-pane' } as never)).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: 'Assumptions · 1 open' })).toBeDefined()
+    await ui.press({ plugin: AP, key: 'as-toggle' })
+    expect(await ui.find({ plugin: AP, key: 'as-right-A1' } as never)).toBeDefined()
+    expect(JSON.stringify(await ui.find({ plugin: AP, key: 'as-wrong-A1' } as never))).toContain('error')
+    await ui.press({ plugin: AP, key: 'as-toggle' })
+    await ui.unmount()
+  }
+})
+
+test('a phone prompt that is dropped marks nothing and tells nothing', async ($, on) => {
+  const world = await boot($, on, { submit: 'drop' })
+  await logAssumption($, 'First')
+  await phonePrompt($, 'status?')
+  expect(savedAt(world).items.map(a => `${a.id} ${a.verdict} ${(a as { told?: boolean }).told === true}`)).toEqual(['A1 open false'])
 })
