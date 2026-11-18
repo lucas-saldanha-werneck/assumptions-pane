@@ -233,7 +233,7 @@ async function boot(
     host?: boolean
     hostCommand?: boolean
     ownPaneUp?: boolean
-    submit?: 'enter' | 'hang'
+    submit?: 'enter' | 'hang' | 'drop'
     storeBroken?: boolean
     /** false: no session.start under this session id (fresh state, as after a /clear). */
     start?: boolean
@@ -315,6 +315,7 @@ async function boot(
     world.sent.push(e.text)
     world.contexts.push([...(e.context ?? [])])
     if (options.submit === 'hang') return new Promise(() => undefined) as never
+    if (options.submit === 'drop') return { drop: 'blocked by a hook' } as never
     return { text: e.text }
   })
   if (options.start !== false) await $.session.start({ cwd: '/tmp', surface: 'terminal', isInteractive: true })
@@ -1026,4 +1027,11 @@ test('the section draws on the terminal and on the desktop app, in the Stack pan
     await ui.press({ plugin: AP, key: 'as-toggle' })
     await ui.unmount()
   }
+})
+
+test('a phone prompt that is dropped marks nothing and tells nothing', async ($, on) => {
+  const world = await boot($, on, { submit: 'drop' })
+  await logAssumption($, 'First')
+  await phonePrompt($, 'status?')
+  expect(savedAt(world).items.map(a => `${a.id} ${a.verdict} ${(a as { told?: boolean }).told === true}`)).toEqual(['A1 open false'])
 })

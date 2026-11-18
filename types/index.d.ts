@@ -41,6 +41,6 @@ declare module 'claude-code' {
       loadedFor: string | null
       showStack: number
     }
-    'side-stack': { shownFor: number }
+    'side-stack': { shownBy: Record<string, number> }
   }
 }

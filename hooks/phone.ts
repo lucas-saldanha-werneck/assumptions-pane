@@ -6,7 +6,7 @@ export type PhoneMark = { id: string; verdict: 'right' | 'wrong'; why?: string }
 
 // A reply that marks every listed assumption right: "ok", "todas certas", "all right".
 const ALL_RIGHT =
-  /^\s*(ok|okay|ok!|certo|certas|todas certas|tudo certo|todas corretas|all right|alright|all good|all correct|yes)\s*[.!]*\s*$/i
+  /^\s*(ok|okay|todas certas|tudo certo|todas corretas|all right|alright|all good|all correct)\s*[.!]*\s*$/i
 
 // One mark: "A46 errado: why", "A46 wrong - why", "A46 certo", "A46 right".
 // The reason runs to the next mark or the end of the reply.

@@ -8,7 +8,7 @@ Versions are the `version` in `.claude-plugin/plugin.json`. Newest first.
 - One heading in both places, `Assumptions · 1 open`; an empty list is one line. The time sits at the end of the assumption's line (`time_format` still applies).
 - Right green, Wrong red, Change… accent, Clear all red. Send shows only with something to send.
 - Shorter status lines ("waiting", "other session", "+3 more").
-- A new assumption or `/assumptions` asks side-stack for its pane silently (the `showStack` counter, side-stack 0.5.0+); `/stack` stays the fallback for an older side-stack.
+- A new assumption or `/assumptions` asks side-stack for its pane silently (the `showStack` counter, side-stack 0.5.1+); `/stack` stays the fallback for an older side-stack.
 - The side-stack guest protocol now comes from `hooks/stack-guest.tsx`, a byte-identical copy of side-stack's (CI checks it).
 - Rendering split by surface: one look for the terminal, one for the apps (desktop, mobile, VS Code). Both draw the same tree for now.
 

@@ -34,10 +34,11 @@ const stacked = atom({ plugin: 'assumptions-pane', key: 'stacked' } as const, fa
 // and a marker in the module would then say "loaded" for a state that is gone.
 // In state it vanishes with the list, so the next look loads again.
 const loadedFor = atom({ plugin: 'assumptions-pane', key: 'loadedFor' } as const, null)
-// Counted up to ask side-stack for its pane, silently; side-stack (0.5.0 and
-// later) answers with the same number in its `shownFor`. An older one answers nothing.
+// Counted up to ask side-stack for its pane, silently; side-stack (0.5.1 and
+// later) answers with the same number in its `shownBy` entry for this plugin.
+// An older one answers nothing.
 const showStackAtom = atom({ plugin: 'assumptions-pane', key: 'showStack' } as const, 0)
-const shownForAtom = atom({ plugin: 'side-stack', key: 'shownFor' } as const, 0)
+const shownByAtom = atom({ plugin: 'side-stack', key: 'shownBy' } as const, {} as Record<string, number>)
 
 // In the stack, the section keeps to this many items so it cannot push the
 // other sections off screen. The rest come in as answered ones leave.
@@ -166,7 +167,7 @@ async function bringStack($: EngineInterface, why: string, asked = false): Promi
     $,
     {
       ask: () => update($, showStackAtom, n => (n ?? 0) + 1),
-      answer: () => read($, shownForAtom),
+      answer: async () => (await read($, shownByAtom))?.['assumptions-pane'] ?? 0,
       fallback: async () => {
         try {
           await $.command.run({ command: 'stack', args: '' })
@@ -565,40 +566,43 @@ const sendNow = async ($: EngineInterface): Promise<void> => {
 // log_assumption call itself (inTurnNote). The marks land in the same store, so
 // the pane on the computer shows them; they count as sent (Claude read the reply).
 
-async function onPhonePrompt($: EngineInterface, text: string): Promise<string[]> {
-  const out: string[] = []
+type PhonePlan = { contexts: string[]; marked: Map<string, Assumption>; told: string[] }
+
+// Reads the reply and picks what to tell; writes nothing (commitPhone does, once the prompt passed).
+async function planPhonePrompt($: EngineInterface, text: string): Promise<PhonePlan> {
+  const contexts: string[] = []
   const now = await nowMs($)
   const list = await read($, items)
   const listedIds = list.filter(a => phoneListed.includes(uid(a)) && a.verdict === 'open').map(a => a.id)
   const marks = parsePhoneReply(text, listedIds)
-  const lines: string[] = []
   const marked = new Map<string, Assumption>()
   if (marks.length > 0) {
     const at = await stamp($)
     for (const m of marks) {
       const a = list.find(one => one.id === m.id && mine(one, now))
       if (a === undefined) continue
-      const item: Assumption = { ...a, verdict: m.verdict, isSent: true, at, told: true, ...(m.why !== undefined ? { correction: m.why } : {}) }
-      marked.set(uid(a), item)
-      lines.push(reviewLine(item))
+      marked.set(uid(a), { ...a, verdict: m.verdict, isSent: true, at, told: true, ...(m.why !== undefined ? { correction: m.why } : {}) })
     }
-    if (marked.size > 0) {
-      await setItems($, l => l.map(a => marked.get(uid(a)) ?? a))
-      await redraw($)
-      out.push(marksContext(lines))
-    }
+    if (marked.size > 0) contexts.push(marksContext([...marked.values()].map(reviewLine)))
   }
-  const untold = (await read($, items)).filter(a => a.verdict === 'open' && !a.isSent && a.told !== true && mine(a, now))
-  if (untold.length > 0) {
-    const ids = untold.map(uid)
-    await setItems($, l => l.map(a => (ids.includes(uid(a)) ? { ...a, told: true } : a)))
-    phoneListed = [...phoneListed.filter(id => !marked.has(id)), ...ids]
-    out.push(phoneListContext(untold.map(a => ({ id: a.id, text: a.text }))))
-  } else {
-    // The ones listed and not answered yet stay for a later "ok".
-    phoneListed = phoneListed.filter(id => !marked.has(id))
-  }
-  return out
+  const untold = list.filter(a => a.verdict === 'open' && !a.isSent && a.told !== true && mine(a, now) && !marked.has(uid(a)))
+  if (untold.length > 0) contexts.push(phoneListContext(untold.map(a => ({ id: a.id, text: a.text }))))
+  return { contexts, marked, told: untold.map(uid) }
+}
+
+// The prompt got through: save the marks and the told flags, and what a later "ok" answers.
+async function commitPhone($: EngineInterface, plan: PhonePlan): Promise<void> {
+  if (plan.marked.size === 0 && plan.told.length === 0) return
+  await setItems($, l =>
+    l.map(a => {
+      const m = plan.marked.get(uid(a))
+      if (m !== undefined) return { ...a, verdict: m.verdict, isSent: true, at: m.at, told: true, ...(m.correction !== undefined ? { correction: m.correction } : {}) }
+      return plan.told.includes(uid(a)) ? { ...a, told: true } : a
+    }),
+  )
+  // The ones listed and not answered yet stay for a later "ok".
+  phoneListed = [...phoneListed.filter(id => !plan.marked.has(id)), ...plan.told]
+  if (plan.marked.size > 0) await redraw($)
 }
 
 // The list keeps at most this many items. Answers not sent yet never count
@@ -882,17 +886,25 @@ export const register: Register = (on, options) => {
     // A slash command (/model, /clear, a skill) is not a message Claude reads
     // as-is: the answers wait for the next prompt.
     if (e.command !== undefined) return next(e)
+    // On the phone: the reply's marks and the assumptions to tell are saved only
+    // once the prompt got through (no drop), as a review is.
+    let phone: PhonePlan | null = null
     if (e.origin?.kind === 'bridge') {
-      const phone = await onPhonePrompt($, e.text ?? '').catch(() => [] as string[])
-      if (phone.length > 0) e = { ...e, context: [...(e.context ?? []), ...phone] }
+      phone = await planPhonePrompt($, e.text ?? '').catch(() => null)
+      if (phone !== null && phone.contexts.length > 0) e = { ...e, context: [...(e.context ?? []), ...phone.contexts] }
+    }
+    const pass = async (ev: typeof e) => {
+      const result = await next(ev)
+      if (phone !== null && result.drop === undefined) await commitPhone($, phone).catch(() => undefined)
+      return result
     }
     const waitingIds = await read($, queued)
     const list = (await sendable($, await read($, items))).filter(a => !waitingIds.includes(uid(a)))
-    if (list.length === 0) return next(e)
+    if (list.length === 0) return pass(e)
     const ids = list.map(uid)
     await update($, queued, q => [...q, ...ids])
     try {
-      const result = await next({ ...e, context: [...(e.context ?? []), reviewText(list)] })
+      const result = await pass({ ...e, context: [...(e.context ?? []), reviewText(list)] })
       if (result.drop === undefined) await markSent($, list)
       return result
     } finally {

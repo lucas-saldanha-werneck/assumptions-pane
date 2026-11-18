@@ -157,7 +157,7 @@ one of these panes (assumptions-pane, idea-shelf, plan-checklist, clean-view), t
   reads "All shown are right" so a row you have not seen is never marked.
 - When Claude logs a new assumption and the Stack pane is not open, or you run `/assumptions`, the
   mod asks side-stack for its pane with nothing in the chat: it counts its `showStack` value up,
-  and side-stack (0.5.0 and later) opens its pane and answers with the same number. A new
+  and side-stack (0.5.1 and later) opens its pane and answers with the same number. A new
   assumption does not ask when your last prompt came through Remote Control (phone or claude.ai),
   where no pane shows (see [On the phone](#on-the-phone)). With an older side-stack, which does not
   answer, the mod runs `/stack` as before (it shows as a line in the transcript and waits until the
