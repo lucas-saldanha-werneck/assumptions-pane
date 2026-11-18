@@ -1,5 +1,5 @@
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, Register, ResolveInput } from 'claude-code'
+import type { EngineInterface, Register, ResolveInput, MatchedHook } from 'claude-code'
 
 import type { Assumption } from '../types'
 
@@ -719,6 +719,43 @@ async function drawSection<E extends ResolveInput>($: EngineInterface, e: E, isS
   )
 }
 
+// True when the tree already holds this mod's section: the other of the two
+// registrations below drew it first (a build where both match), so it is drawn once.
+function hasSection(node: unknown): boolean {
+  if (node === null || typeof node !== 'object') return false
+  const el = node as { props?: { key?: unknown }; children?: unknown }
+  if (el.props?.key === SECTION_KEY) return true
+  return Array.isArray(el.children) && el.children.some(hasSection)
+}
+
+// Inside side-stack's shared pane: our section, then every section beneath,
+// unless side-stack left an empty slot for us (a set order): then it goes there.
+// Claude Code 2.1.327+ hears only a plugin's own drawings unless the matcher
+// names `plugin` ("*" = every plugin's); side-stack opens this pane, so the
+// first matcher is the one that runs there. Older builds know no `plugin` key
+// on a Pane and run the second; each build runs exactly one of the two.
+const drawInStack: MatchedHook<'ui.render', { component: 'Pane'; requestId: typeof STACK_PANE }> = async ($, e, next) => {
+  stackSeenOpen = true
+  const below = await next(e)
+  if (hasSection(below)) return below
+  const now = await drawingState($)
+  if (!now.isStacked) return below
+  const { Box } = $.ui.resolve(e)
+  const section = (
+    <Box key={SECTION_KEY} flexDirection="column" marginBottom={1}>
+      {await drawSection($, e, true, now.list)}
+    </Box>
+  )
+  const filled = fillSlot(below, section)
+  if (filled !== undefined) return filled as typeof below
+  return (
+    <Box flexDirection="column">
+      {section}
+      {below}
+    </Box>
+  )
+}
+
 export const register: Register = (on, options) => {
   const chosen = String((options as Record<string, unknown> | undefined)?.time_format ?? '')
   timeFormat = (TIME_FORMATS as readonly string[]).includes(chosen) ? (chosen as TimeFormat) : 'YYYY-MM-DD HH:MM'
@@ -900,26 +937,6 @@ export const register: Register = (on, options) => {
     return drawSection($, e, false, now.list)
   })
 
-  // Inside side-stack's shared pane: our section, then every section beneath,
-  // unless side-stack left an empty slot for us (a set order): then it goes there.
-  on('ui.render', { component: 'Pane', requestId: STACK_PANE }, async ($, e, next) => {
-    stackSeenOpen = true
-    const now = await drawingState($)
-    if (!now.isStacked) return next(e)
-    const { Box } = $.ui.resolve(e)
-    const section = (
-      <Box key={SECTION_KEY} flexDirection="column" marginBottom={1}>
-        {await drawSection($, e, true, now.list)}
-      </Box>
-    )
-    const below = await next(e)
-    const filled = fillSlot(below, section)
-    if (filled !== undefined) return filled as typeof below
-    return (
-      <Box flexDirection="column">
-        {section}
-        {below}
-      </Box>
-    )
-  })
+  on('ui.render', { component: 'Pane', requestId: STACK_PANE, plugin: '*' }, drawInStack)
+  on('ui.render', { component: 'Pane', requestId: STACK_PANE }, drawInStack)
 }
