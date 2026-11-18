@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/lucas-saldanha-werneck/assumptions-pane/actions/workflows/test.yml/badge.svg)](https://github.com/lucas-saldanha-werneck/assumptions-pane/actions/workflows/test.yml)
 [![License](https://img.shields.io/github/license/lucas-saldanha-werneck/assumptions-pane)](LICENSE)
-[![Version](https://img.shields.io/badge/version-0.3.7-blue)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.5.0-blue)](CHANGELOG.md)
 [![plugin score (proposal)](https://img.shields.io/badge/plugin%20score%20(proposal)-94.2%20A-brightgreen)](https://github.com/NVIDIA/SkillEvaluator/issues/508)
 
 A Claude Code mod: a side pane that lists each assumption Claude makes while it works, so you can
@@ -24,17 +24,18 @@ another), it logs it in one line and keeps working. This sketch shows roughly ho
 a terminal after you press Show. It is not a screenshot:
 
 ```
-Assumptions (2 open)
-2 assumptions, 2 open  Hide
-? A1 The table sorts by date, newest first
-  2026-11-25 18:02
+Assumptions · 2 open ────────── Hide
+? A1 The table sorts by date, newest first  2026-11-25 18:02
   why: most recent entries matter most
   [ Right ] [ Wrong ] Change…
-? A2 Prices are shown in USD
-  2026-11-25 18:05
+? A2 Prices are shown in USD  2026-11-25 18:05
   [ Right ] [ Wrong ] Change…
-[ Nothing to send ] All open are right Clear all
+All open are right Clear all
 ```
+
+Right is green, Wrong red, Change… in the accent color, and Clear all red. Send (`Send 1 to
+Claude`) shows only once you have answered something. With nothing logged the pane is one line,
+`Assumptions · 0`.
 
 ## What Claude sees
 
@@ -113,7 +114,7 @@ also loads in the desktop app's local Code sessions.
 - Answered items leave the list once Claude has them. Open items stay. If you change an answer
   while the review waits, the new answer stays in the pane so you can send it.
 - Numbers keep counting after a clear and after a reload, so "A3" always means one item.
-- Each item shows, in grey under its text, when it was logged, in this computer's time zone, so
+- Each item shows, in grey at the end of its line, when it was logged, in this computer's time zone, so
   old items stand apart from current ones. Items saved by an older version show the time of their
   last change.
 - Line breaks and runs of spaces in an assumption or a change are saved as one space.
@@ -154,10 +155,13 @@ one of these panes (assumptions-pane, idea-shelf, plan-checklist, clean-view), t
   under the heading "Assumptions", with the same buttons. To keep room for the other parts it shows
   at most 6 items at a time; the rest show as the first ones are answered and sent, and the button
   reads "All shown are right" so a row you have not seen is never marked.
-- When Claude logs a new assumption, or you run `/assumptions`, and the Stack pane is not open, the mod
-  runs `/stack` to bring it up. That waits until Claude's turn ends (Claude Code runs a command a
-  mod asks for only when the session is idle), and the command shows a line in the transcript.
-  If it cannot run, a short notice says to open the pane with `/stack`.
+- When Claude logs a new assumption and the Stack pane is not open, or you run `/assumptions`, the
+  mod asks side-stack for its pane with nothing in the chat: it counts its `showStack` value up,
+  and side-stack (0.5.0 and later) opens its pane and answers with the same number. A new
+  assumption does not ask when your last prompt came through Remote Control (phone or claude.ai),
+  where no pane shows (see [On the phone](#on-the-phone)). With an older side-stack, which does not
+  answer, the mod runs `/stack` as before (it shows as a line in the transcript and waits until the
+  turn ends); if that cannot run, a short notice says to open the pane with `/stack`.
 - If an Assumptions pane from before is still on screen, it shows one line, "Shown in the Stack pane
   (/stack)", so the list never appears twice.
 - While it draws inside the Stack pane the mod sets its own `stacked` value, which side-stack reads
@@ -169,7 +173,35 @@ one of these panes (assumptions-pane, idea-shelf, plan-checklist, clean-view), t
   draws its part there. With no such box it draws on top of the parts beneath, as before.
 - If side-stack starts after this mod, the mod notices within about a second and closes its own pane.
 
+## On the phone
+
+Remote Control (the phone app, claude.ai) draws no pane, so there Claude tells you the assumptions
+in the chat, the way [side-notes](https://github.com/lucas-saldanha-werneck/side-notes) tells its notes.
+
+- A session counts as driven from the phone when your last prompt came through Remote Control
+  (origin `bridge`). A prompt typed in the terminal (`composer`) or in the desktop app (`sdk`) ends that.
+- An assumption Claude logs during a phone-driven turn is told in that turn: the tool's answer asks
+  Claude to list it at the end of its final reply. Open assumptions you have not been told about
+  (logged while you were at the computer, or by another session in the folder) go with your next
+  phone prompt, and Claude lists them at the end of its reply, in your language, for example:
+  `Suposições: A46 – a página mostra o polish junto · A47 – … — responda "ok" ou "A46 errado: …"`.
+- Each assumption is told once (saved with the list as `told`).
+- Your next phone prompt is read as the answer: a bare `ok` (or `todas certas`, `tudo certo`,
+  `all right`) marks every listed assumption right; `A46 errado: <why>` (or `A46 wrong: <why>`)
+  marks that one wrong with the reason; `A46 certo` (or `A46 right`) marks it right. Several in one
+  prompt work. Nothing the reply does not name is marked, except on `ok`.
+- The marks go into the same saved list, so the pane on the computer shows them (dim, as sent:
+  Claude read your reply, so Send does not send them again). Claude gets them as a review in that
+  prompt and applies each wrong one.
+
 ## Terminal and desktop app
+
+**Terminal look and app look.** The drawing is split by surface: one look for the terminal, one for
+the apps (desktop, mobile, VS Code). Today both draw the same tree. Where each look lives, and how to
+change one without the other: side-stack's README,
+[Shared guest code, and where the terminal and app looks live](https://github.com/lucas-saldanha-werneck/side-stack#shared-guest-code-and-where-the-terminal-and-app-looks-live).
+This repo's `hooks/stack-guest.tsx` is a byte-identical copy of side-stack's (CI checks it): change
+it there first.
 
 The same code draws on both, and the tests draw the own pane, the Stack section, the buttons and the
 review flow on the `terminal` and `desktop` surfaces. What differs is Claude Code's own layout:

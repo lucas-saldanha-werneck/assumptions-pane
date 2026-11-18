@@ -1,7 +1,10 @@
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, Register, ResolveInput, MatchedHook } from 'claude-code'
+import type { EngineInterface, Register, ResolveInput } from 'claude-code'
 
 import type { Assumption } from '../types'
+import { inTurnNote, marksContext, parsePhoneReply, phoneListContext } from './phone'
+import { HOST_CHECKS_MS, STACKED_LINE, hasSection, heading, hostPresent, lookOf, notePrompt, placeSection, promptFromPhone, showStack } from './stack-guest'
+import type { Look, StackHook } from './stack-guest'
 
 // A small side pane: Claude logs each assumption it makes while it builds;
 // the person marks it right or wrong, types a change, and sends the answers.
@@ -9,7 +12,6 @@ import type { Assumption } from '../types'
 // one section inside the shared "Stack" pane instead.
 
 const PANE = 'assumptions'
-const STACK_PANE = 'side-stack'
 const items = atom({ plugin: 'assumptions-pane', key: 'items' } as const, [])
 const isExpanded = atom({ plugin: 'assumptions-pane', key: 'isExpanded' } as const, false)
 const editing = atom({ plugin: 'assumptions-pane', key: 'editing' } as const, null)
@@ -32,6 +34,10 @@ const stacked = atom({ plugin: 'assumptions-pane', key: 'stacked' } as const, fa
 // and a marker in the module would then say "loaded" for a state that is gone.
 // In state it vanishes with the list, so the next look loads again.
 const loadedFor = atom({ plugin: 'assumptions-pane', key: 'loadedFor' } as const, null)
+// Counted up to ask side-stack for its pane, silently; side-stack (0.5.0 and
+// later) answers with the same number in its `shownFor`. An older one answers nothing.
+const showStackAtom = atom({ plugin: 'assumptions-pane', key: 'showStack' } as const, 0)
+const shownForAtom = atom({ plugin: 'side-stack', key: 'shownFor' } as const, 0)
 
 // In the stack, the section keeps to this many items so it cannot push the
 // other sections off screen. The rest come in as answered ones leave.
@@ -82,9 +88,6 @@ let lastStamp = 0
 let timeFormat: TimeFormat = 'YYYY-MM-DD HH:MM'
 let saving: Promise<void> = Promise.resolve()
 let saveFailed = false
-// Whether side-stack's pane is up, as far as this plugin has seen.
-let stackSeenOpen = false
-let stackAsked = false
 // One reload at a time.
 let ensuring: Promise<void> | null = null
 // The session watch: started once per process, it outlives a /clear.
@@ -95,6 +98,8 @@ let owners: Record<string, number> = {}
 let lastBeat = 0
 // Highest number among ids trimmed off `removed`: an item at or below it never comes back.
 let removedFloor = 0
+// On the phone: the assumptions Claude was last asked to list (uids), which a bare "ok" answers.
+let phoneListed: string[] = []
 
 // The identity of an item: its number and the process that logged it.
 const uid = (a: { id: string; owner?: string }): string => (a.owner !== undefined ? `${a.id}@${a.owner}` : a.id)
@@ -137,16 +142,8 @@ async function stamp($: EngineInterface): Promise<number> {
 
 // --- side-stack presence ----------------------------------------------------
 
-// side-stack runs when its /stack command is listed. Its `present` state value
-// is per session and gone after a /clear, so it is not relied on.
-async function hostPresent($: EngineInterface): Promise<boolean> {
-  try {
-    const cmds = await $.command.list()
-    return cmds.some(c => c.name === 'stack' && (c.plugin ?? '').split('@')[0] === 'side-stack')
-  } catch {
-    return false
-  }
-}
+// side-stack runs when its /stack command is listed (hostPresent, stack-guest.tsx).
+// Its `present` state value is per session and gone after a /clear, so it is not relied on.
 
 // Checks side-stack again and publishes this plugin's own `stacked` flag.
 async function checkStack($: EngineInterface): Promise<boolean> {
@@ -159,30 +156,31 @@ async function checkStack($: EngineInterface): Promise<boolean> {
   return isUp
 }
 
-// Something new to see while stacked: bring side-stack's pane up if it is not.
-// $.command.run waits for the session to be idle and is refused inside a hook
-// the turn waits on, so it goes out from a timer, not from the hook.
-function bringStack($: EngineInterface, why: string): void {
-  if (stackSeenOpen || stackAsked) return
-  stackAsked = true
-  const fail = () => {
-    stackAsked = false
-    try {
-      $.ui.toast(`${why} Open the Stack pane with /stack to see it.`)
-    } catch {
-      // Nothing more to do.
-    }
-  }
-  try {
-    $.clock.after(0, () => {
-      void $.command.run({ command: 'stack', args: '' }).then(() => {
-        stackSeenOpen = true
-        stackAsked = false
-      }, fail)
-    })
-  } catch {
-    fail()
-  }
+// Something new to see while stacked: ask side-stack for its pane, with nothing
+// in the chat (its showStack counter). Not when the pane is open already, or the
+// person reads from Remote Control (no pane shows there); `asked` (/assumptions)
+// always asks. An older side-stack answers nothing: then /stack runs, and if that
+// is refused, a toast says where to look.
+async function bringStack($: EngineInterface, why: string, asked = false): Promise<void> {
+  await showStack(
+    $,
+    {
+      ask: () => update($, showStackAtom, n => (n ?? 0) + 1),
+      answer: () => read($, shownForAtom),
+      fallback: async () => {
+        try {
+          await $.command.run({ command: 'stack', args: '' })
+        } catch {
+          try {
+            $.ui.toast(`${why} Open the Stack pane with /stack to see it.`)
+          } catch {
+            // Nothing more to do.
+          }
+        }
+      },
+    },
+    asked,
+  ).catch(() => false)
 }
 
 // --- Saved list -------------------------------------------------------------
@@ -373,7 +371,7 @@ const openPane = async ($: EngineInterface, focus = false, why?: string): Promis
   if (await checkStack($)) {
     // The state reads in the section's drawing redraw it on their own.
     await closeOwnPane($)
-    if (why !== undefined) bringStack($, why)
+    if (why !== undefined) await bringStack($, why)
     return
   }
   const list = await read($, items)
@@ -558,6 +556,51 @@ const sendNow = async ($: EngineInterface): Promise<void> => {
   }
 }
 
+// --- On the phone -------------------------------------------------------------
+// Remote Control draws no pane. A phone prompt first applies the person's reply
+// to the assumptions Claude listed ("ok" marks them all right, "A46 errado: why"
+// marks one wrong), then hands Claude the open assumptions the person has not
+// been told about, to list at the end of its reply. Each is told once (`told`,
+// saved with the list); one logged during a phone-driven turn is told by the
+// log_assumption call itself (inTurnNote). The marks land in the same store, so
+// the pane on the computer shows them; they count as sent (Claude read the reply).
+
+async function onPhonePrompt($: EngineInterface, text: string): Promise<string[]> {
+  const out: string[] = []
+  const now = await nowMs($)
+  const list = await read($, items)
+  const listedIds = list.filter(a => phoneListed.includes(uid(a)) && a.verdict === 'open').map(a => a.id)
+  const marks = parsePhoneReply(text, listedIds)
+  const lines: string[] = []
+  const marked = new Map<string, Assumption>()
+  if (marks.length > 0) {
+    const at = await stamp($)
+    for (const m of marks) {
+      const a = list.find(one => one.id === m.id && mine(one, now))
+      if (a === undefined) continue
+      const item: Assumption = { ...a, verdict: m.verdict, isSent: true, at, told: true, ...(m.why !== undefined ? { correction: m.why } : {}) }
+      marked.set(uid(a), item)
+      lines.push(reviewLine(item))
+    }
+    if (marked.size > 0) {
+      await setItems($, l => l.map(a => marked.get(uid(a)) ?? a))
+      await redraw($)
+      out.push(marksContext(lines))
+    }
+  }
+  const untold = (await read($, items)).filter(a => a.verdict === 'open' && !a.isSent && a.told !== true && mine(a, now))
+  if (untold.length > 0) {
+    const ids = untold.map(uid)
+    await setItems($, l => l.map(a => (ids.includes(uid(a)) ? { ...a, told: true } : a)))
+    phoneListed = [...phoneListed.filter(id => !marked.has(id)), ...ids]
+    out.push(phoneListContext(untold.map(a => ({ id: a.id, text: a.text }))))
+  } else {
+    // The ones listed and not answered yet stay for a later "ok".
+    phoneListed = phoneListed.filter(id => !marked.has(id))
+  }
+  return out
+}
+
 // The list keeps at most this many items. Answers not sent yet never count
 // against it: only the oldest items with nothing to send leave.
 const MAX_ITEMS = 100
@@ -588,36 +631,12 @@ async function askClear($: EngineInterface): Promise<void> {
 
 // --- Drawing ----------------------------------------------------------------
 
-// side-stack orders its sections by these keys (protocol v4): ours is
-// `side-stack:assumptions-pane`, and an empty Box keyed
-// `side-stack:slot:assumptions-pane` in the tree beneath is where it goes.
-const SECTION_KEY = 'side-stack:assumptions-pane'
-const SLOT_KEY = 'side-stack:slot:assumptions-pane'
-
-type Tree = { props?: Record<string, unknown>; children?: unknown[] }
-
-// A copy of the tree with our slot replaced by the section, or undefined when
-// the tree has no slot (side-stack is not beneath, or keeps install order).
-function fillSlot(node: unknown, section: unknown): unknown {
-  const el = node as Tree | null
-  if (el === null || typeof el !== 'object' || !Array.isArray(el.children)) return undefined
-  for (let i = 0; i < el.children.length; i++) {
-    const child = el.children[i] as Tree | null
-    const swapped =
-      child !== null && typeof child === 'object' && child.props?.key === SLOT_KEY ? section : fillSlot(child, section)
-    if (swapped !== undefined) {
-      const children = [...el.children]
-      children[i] = swapped
-      return { ...el, children }
-    }
-  }
-  return undefined
-}
-
-// Draws the list. Alone it fills our own pane; stacked it is one section of the
-// side-stack pane, with a heading, a row budget, and keys prefixed "as-" so they
-// never clash with another section's buttons.
-async function drawSection<E extends ResolveInput>($: EngineInterface, e: E, isStacked: boolean, saved?: Assumption[]) {
+// Draws the list. One view for both looks (terminal and app, see
+// stack-guest.tsx); today they draw the same tree. Alone it fills our own pane;
+// stacked it is one section of the side-stack pane, with a row budget and keys
+// prefixed "as-" so they never clash with another section's buttons. An empty
+// list is one heading line.
+async function drawSection<E extends ResolveInput>($: EngineInterface, e: E, look: Look, isStacked: boolean, saved?: Assumption[]) {
   const table = $.ui.resolve(e)
   const { Box, Text, Button } = table
   // A surface table without Input falls back to a hint. (A mobile app that does not draw
@@ -637,123 +656,111 @@ async function drawSection<E extends ResolveInput>($: EngineInterface, e: E, isS
   const shown = isStacked ? list.slice(0, STACK_ROWS) : list
   const hidden = list.length - shown.length
 
-  const summary = list.length === 0 ? 'No assumptions yet' : `${list.length} assumptions, ${open} open`
+  // Empty: the heading alone, nothing to show or hide.
+  if (list.length === 0) return heading($, e, look, 'assumptions-pane', 'Assumptions', '0')
   const toggle = (
     <Button key={k('toggle')} plain onPress={() => update($, isExpanded, v => !v)}>
       {expanded ? 'Hide' : 'Show'}
     </Button>
   )
-  const header = isStacked ? (
-    <Box flexDirection="row" gap={1} alignItems="center">
-      <Text bold>Assumptions</Text>
-      <Text dimColor>{list.length === 0 ? 'none yet' : `${list.length}, ${open} open`}</Text>
-      {toggle}
-    </Box>
-  ) : (
-    <Box flexDirection="row" gap={1} alignItems="center">
-      <Text bold>{summary}</Text>
-      {toggle}
-    </Box>
-  )
-  if (!expanded) return <Box key="assumptions" flexDirection="column">{header}</Box>
+  const header = heading($, e, look, 'assumptions-pane', 'Assumptions', `${open} open`, toggle)
+  if (!expanded) return header
 
   return (
-    <Box key="assumptions" flexDirection="column" gap={1}>
+    <Box flexDirection="column" gap={1}>
       {header}
-      {shown.map(a => (
-        <Box key={k(`row-${rowKey(a)}`)} flexDirection="column">
-          <Text
-            color={a.verdict === 'right' ? 'success' : a.verdict === 'wrong' ? 'error' : undefined}
-            dimColor={a.isSent && a.verdict === 'right'}
-          >
-            {a.verdict === 'right' ? '✓' : a.verdict === 'wrong' ? '✗' : '?'} {a.id} {a.text}
-          </Text>
-          {(a.createdAt ?? a.at) !== undefined && <Text dimColor>  {formatTime(a.createdAt ?? a.at ?? 0, timeFormat)}</Text>}
-          {a.why !== undefined && <Text dimColor>  why: {a.why}</Text>}
-          {(a.correction ?? '') !== '' && <Text color="warning">  change: {a.correction}</Text>}
-          {queuedIds.includes(uid(a)) && <Text dimColor>  sent, waiting for Claude to finish its turn</Text>}
-          {elsewhere.has(uid(a)) && <Text dimColor>  logged in another open session: it goes to that Claude</Text>}
-          <Box flexDirection="row" gap={1}>
-            <Button key={k(`right-${rowKey(a)}`)} onPress={() => setOne($, uid(a), { verdict: 'right' })}>Right</Button>
-            <Button key={k(`wrong-${rowKey(a)}`)} onPress={() => setOne($, uid(a), { verdict: 'wrong' })}>Wrong</Button>
-            <Button key={k(`edit-${rowKey(a)}`)} plain onPress={() => update($, editing, v => (v === uid(a) ? null : uid(a)))}>
-              Change…
-            </Button>
+      {shown.map(a => {
+        const at = a.createdAt ?? a.at
+        return (
+          <Box key={k(`row-${rowKey(a)}`)} flexDirection="column">
+            <Text
+              color={a.verdict === 'right' ? 'success' : a.verdict === 'wrong' ? 'error' : undefined}
+              dimColor={a.isSent && a.verdict === 'right'}
+            >
+              {a.verdict === 'right' ? '✓' : a.verdict === 'wrong' ? '✗' : '?'} {a.id} {a.text}
+              {at !== undefined ? <Text dimColor>  {formatTime(at, timeFormat)}</Text> : null}
+            </Text>
+            {a.why !== undefined && <Text dimColor>  why: {a.why}</Text>}
+            {(a.correction ?? '') !== '' && <Text color="warning">  change: {a.correction}</Text>}
+            {queuedIds.includes(uid(a)) && <Text dimColor>  waiting</Text>}
+            {elsewhere.has(uid(a)) && <Text dimColor>  other session</Text>}
+            <Box flexDirection="row" gap={1}>
+              <Button key={k(`right-${rowKey(a)}`)} label="Right" onPress={() => setOne($, uid(a), { verdict: 'right' })}>
+                <Text color="success">Right</Text>
+              </Button>
+              <Button key={k(`wrong-${rowKey(a)}`)} label="Wrong" onPress={() => setOne($, uid(a), { verdict: 'wrong' })}>
+                <Text color="error">Wrong</Text>
+              </Button>
+              <Button key={k(`edit-${rowKey(a)}`)} label="Change…" plain onPress={() => update($, editing, v => (v === uid(a) ? null : uid(a)))}>
+                <Text color="suggestion">Change…</Text>
+              </Button>
+            </Box>
+            {editId === uid(a) && Input === undefined && <Text dimColor>  Type the change in the prompt box.</Text>}
+            {editId === uid(a) && Input !== undefined && (
+              <Input
+                key={k(`fix-${rowKey(a)}`)}
+                placeholder="What should it be?"
+                submitLabel="save"
+                value={a.correction ?? ''}
+                autoFocus
+                onSubmit={async (value: string) => {
+                  await setOne($, uid(a), { correction: norm(value).slice(0, 400), verdict: a.verdict === 'open' ? 'wrong' : a.verdict })
+                  await update($, editing, () => null)
+                }}
+              />
+            )}
           </Box>
-          {editId === uid(a) && Input === undefined && <Text dimColor>  Type the change in the prompt box.</Text>}
-          {editId === uid(a) && Input !== undefined && (
-            <Input
-              key={k(`fix-${rowKey(a)}`)}
-              placeholder="What should it be?"
-              submitLabel="save"
-              value={a.correction ?? ''}
-              autoFocus
-              onSubmit={async (value: string) => {
-                await setOne($, uid(a), { correction: norm(value).slice(0, 400), verdict: a.verdict === 'open' ? 'wrong' : a.verdict })
-                await update($, editing, () => null)
-              }}
-            />
-          )}
-        </Box>
-      ))}
-      {hidden > 0 && <Text dimColor>+{hidden} more: they show as these are answered and sent</Text>}
-      {list.length > 0 && (
-        <Box flexDirection="row" gap={1}>
+        )
+      })}
+      {hidden > 0 && <Text dimColor>+{hidden} more</Text>}
+      <Box flexDirection="row" gap={1}>
+        {/* Send shows only with something to send; "Waiting…" while a send is queued. */}
+        {waiting > 0 && (
           <Button key={k('send')} variant="primary" onPress={() => sendNow($)}>
-            {waiting > 0 ? `Send ${waiting} to Claude` : queuedIds.length > 0 ? 'Waiting for Claude…' : 'Nothing to send'}
+            {`Send ${waiting} to Claude`}
           </Button>
-          <Button key={k('all-right')} plain onPress={async () => {
-            // Only rows the person can see: hidden ones are never marked unseen.
-            const seen = shown.map(uid)
-            const at = await stamp($)
-            await setItems($, l => l.map(a => (a.verdict === 'open' && seen.includes(uid(a)) ? { ...a, verdict: 'right' as const, isSent: false, at } : a)))
-            await openPane($)
-          }}>{hidden > 0 ? 'All shown are right' : 'All open are right'}</Button>
-          {/* Asked: Cancel takes the place "Clear all" had, so a double press cancels. */}
-          {confirm && <Button key={k('clear-no')} plain onPress={() => update($, confirmClear, () => 0)}>Cancel</Button>}
-          {confirm && <Button key={k('clear-yes')} onPress={() => clearAll($)}>Yes, clear all</Button>}
-          {!confirm && <Button key={k('clear')} plain onPress={() => askClear($)}>Clear all</Button>}
-        </Box>
-      )}
+        )}
+        {waiting === 0 && queuedIds.length > 0 && (
+          <Button key={k('send')} variant="primary" onPress={() => sendNow($)}>
+            Waiting for Claude…
+          </Button>
+        )}
+        <Button key={k('all-right')} plain onPress={async () => {
+          // Only rows the person can see: hidden ones are never marked unseen.
+          const seen = shown.map(uid)
+          const at = await stamp($)
+          await setItems($, l => l.map(a => (a.verdict === 'open' && seen.includes(uid(a)) ? { ...a, verdict: 'right' as const, isSent: false, at } : a)))
+          await openPane($)
+        }}>{hidden > 0 ? 'All shown are right' : 'All open are right'}</Button>
+        {/* Asked: Cancel takes the place "Clear all" had, so a double press cancels. */}
+        {confirm && <Button key={k('clear-no')} plain onPress={() => update($, confirmClear, () => 0)}>Cancel</Button>}
+        {confirm && (
+          <Button key={k('clear-yes')} label="Yes, clear all" onPress={() => clearAll($)}>
+            <Text color="error">Yes, clear all</Text>
+          </Button>
+        )}
+        {!confirm && (
+          <Button key={k('clear')} label="Clear all" plain onPress={() => askClear($)}>
+            <Text color="error">Clear all</Text>
+          </Button>
+        )}
+      </Box>
     </Box>
   )
 }
 
-// True when the tree already holds this mod's section: the other of the two
-// registrations below drew it first (a build where both match), so it is drawn once.
-function hasSection(node: unknown): boolean {
-  if (node === null || typeof node !== 'object') return false
-  const el = node as { props?: { key?: unknown }; children?: unknown }
-  if (el.props?.key === SECTION_KEY) return true
-  return Array.isArray(el.children) && el.children.some(hasSection)
-}
-
-// Inside side-stack's shared pane: our section, then every section beneath,
-// unless side-stack left an empty slot for us (a set order): then it goes there.
-// Claude Code 2.1.327+ hears only a plugin's own drawings unless the matcher
-// names `plugin` ("*" = every plugin's); side-stack opens this pane, so the
-// first matcher is the one that runs there. Older builds know no `plugin` key
-// on a Pane and run the second; each build runs exactly one of the two.
-const drawInStack: MatchedHook<'ui.render', { component: 'Pane'; requestId: typeof STACK_PANE }> = async ($, e, next) => {
-  stackSeenOpen = true
-  const below = await next(e)
-  if (hasSection(below)) return below
+// Inside side-stack's shared pane: our section, then every section beneath
+// (or in the slot side-stack left for it). See stack-guest.tsx.
+async function drawStacked<E extends ResolveInput>($: EngineInterface, e: E, look: Look) {
   const now = await drawingState($)
-  if (!now.isStacked) return below
-  const { Box } = $.ui.resolve(e)
-  const section = (
-    <Box key={SECTION_KEY} flexDirection="column" marginBottom={1}>
-      {await drawSection($, e, true, now.list)}
-    </Box>
-  )
-  const filled = fillSlot(below, section)
-  if (filled !== undefined) return filled as typeof below
-  return (
-    <Box flexDirection="column">
-      {section}
-      {below}
-    </Box>
-  )
+  if (!now.isStacked) return null
+  return drawSection($, e, look, true, now.list)
+}
+const drawInStack: StackHook = async ($, e, next) => {
+  const below = await next(e)
+  if (hasSection(below, 'assumptions-pane')) return below
+  // A broken section never hides the others.
+  return placeSection($, e, below, 'assumptions-pane', await drawStacked($, e, lookOf(e.surface)).catch(() => null))
 }
 
 export const register: Register = (on, options) => {
@@ -764,8 +771,6 @@ export const register: Register = (on, options) => {
     lastKey = key
     saving = Promise.resolve()
     saveFailed = false
-    stackSeenOpen = false
-    stackAsked = false
     {
       const id = await sessionId($)
       await update($, loadedFor, () => id)
@@ -793,7 +798,7 @@ export const register: Register = (on, options) => {
       argumentHint: 'clear',
     })
     await settlePane($)
-    for (const ms of [100, 1100]) {
+    for (const ms of HOST_CHECKS_MS) {
       try {
         $.clock.after(ms, () => {
           void settlePane($).catch(() => undefined)
@@ -845,14 +850,18 @@ export const register: Register = (on, options) => {
     const id = `A${(await update($, nextId, n => n + 1)) - 1}`
     const at = await stamp($)
     const prevIds = (await read($, items)).map(uid)
+    // On the phone (Remote Control) no pane shows: Claude lists it at the end of this turn's reply.
+    const isPhone = promptFromPhone()
     const after = await update($, items, list => {
-      const one: Assumption = { id, text, verdict: 'open', isSent: false, at, createdAt: at, owner: OWNER, ...(why !== '' ? { why } : {}) }
+      const one: Assumption = { id, text, verdict: 'open', isSent: false, at, createdAt: at, owner: OWNER, ...(why !== '' ? { why } : {}), ...(isPhone ? { told: true } : {}) }
       return capped([...list, one])
     })
+    if (isPhone) phoneListed = [...phoneListed, `${id}@${OWNER}`]
     // Rows the cap pushed out stay out of the saved list too.
     await forget($, prevIds.filter(old => !after.some(a => uid(a) === old)))
     await saveItems($)
     await openPane($, false, `New assumption ${id}.`)
+    if (isPhone) return { result: `Logged as ${id}. Keep working.\n${inTurnNote({ id, text })}` }
     return { result: `Logged as ${id}. Keep working; the person may correct it later.` }
   }).catch(($, e, next) => next(e))
 
@@ -860,6 +869,7 @@ export const register: Register = (on, options) => {
   // once the prompt has entered; if it is dropped or fails, they stay.
   on('prompt.submit', async ($, e, next) => {
     await ensureSession($).catch(() => undefined)
+    notePrompt(e.origin?.kind)
     if (e.origin?.kind === 'plugin') {
       const result = await next(e)
       // Our own review entering the chat: its rows leave now.
@@ -872,6 +882,10 @@ export const register: Register = (on, options) => {
     // A slash command (/model, /clear, a skill) is not a message Claude reads
     // as-is: the answers wait for the next prompt.
     if (e.command !== undefined) return next(e)
+    if (e.origin?.kind === 'bridge') {
+      const phone = await onPhonePrompt($, e.text ?? '').catch(() => [] as string[])
+      if (phone.length > 0) e = { ...e, context: [...(e.context ?? []), ...phone] }
+    }
     const waitingIds = await read($, queued)
     const list = (await sendable($, await read($, items))).filter(a => !waitingIds.includes(uid(a)))
     if (list.length === 0) return next(e)
@@ -898,17 +912,6 @@ export const register: Register = (on, options) => {
     return next(e)
   }).catch(($, e, next) => next(e))
 
-  // Follows side-stack's pane: brought up only while it is not open.
-  on('ui.open', async ($, e, next) => {
-    const result = await next(e)
-    if (e.id === STACK_PANE) stackSeenOpen = true
-    return result
-  })
-  on('ui.close', async ($, e, next) => {
-    if (e.id === STACK_PANE) stackSeenOpen = false
-    return next(e)
-  })
-
   on('command.run', { command: 'assumptions' }, async ($, e) => {
     await ensureSession($).catch(() => undefined)
     if (e.args.trim().toLowerCase() === 'clear') {
@@ -919,9 +922,8 @@ export const register: Register = (on, options) => {
     await update($, isExpanded, () => true)
     if (await checkStack($)) {
       await closeOwnPane($)
-      stackSeenOpen = false
-      bringStack($, 'The assumptions are in the Stack pane.')
-      return { text: 'Assumptions are in the Stack pane (/stack opens it).' }
+      await bringStack($, 'The assumptions are in the Stack pane.', true)
+      return { text: 'Stack pane opened.' }
     }
     await openPane($, true)
     return { text: 'Assumptions pane opened.' }
@@ -932,11 +934,11 @@ export const register: Register = (on, options) => {
     if (now.isStacked) {
       // Never the list twice with live buttons.
       const { Text } = $.ui.resolve(e)
-      return <Text dimColor>Shown in the Stack pane (/stack)</Text>
+      return <Text dimColor>{STACKED_LINE}</Text>
     }
-    return drawSection($, e, false, now.list)
+    return drawSection($, e, lookOf(e.surface), false, now.list)
   })
 
-  on('ui.render', { component: 'Pane', requestId: STACK_PANE, plugin: '*' }, drawInStack)
-  on('ui.render', { component: 'Pane', requestId: STACK_PANE }, drawInStack)
+  on('ui.render', { component: 'Pane', requestId: 'side-stack', plugin: '*' }, drawInStack)
+  on('ui.render', { component: 'Pane', requestId: 'side-stack' }, drawInStack)
 }
