@@ -17,7 +17,7 @@ jobs:
           node-version: '22'
       - uses: oven-sh/setup-bun@v2
       # pinned: a new Claude Code release must not change the result without a commit here
-      - run: npm i -g @anthropic-ai/claude-code@2.1.322
+      - run: npm i -g @anthropic-ai/claude-code@2.1.327
       - run: claude plugin validate . && claude plugin test .
       - name: hooks/stack-guest.tsx matches side-stack's copy
         if: runner.os == 'Linux'

@@ -214,6 +214,9 @@ type World = {
   host: { present: boolean; command: boolean }
   clock: ReturnType<typeof mock.clock>
   session: { id: string }
+  envSets: string[]
+  /** The next N writes of a key fail as if another session held the lock. */
+  failSetFor: Record<string, number>
 }
 
 /** The world beneath the plugin, with a store the test can read (mock.store
@@ -239,6 +242,8 @@ async function boot(
     cwd?: string
     /** Session state already there (a reload of the module keeps it), by key. */
     state?: Record<string, unknown>
+    /** The process environment the mod reads (CLAUDE_PID, CLAUDE_SUB_PARENT, CLAUDE_SUB_NAME). */
+    env?: Record<string, string>
   } = {},
 ): Promise<World> {
   const world: World = {
@@ -254,6 +259,8 @@ async function boot(
     host: { present: options.host ?? false, command: options.hostCommand ?? options.host ?? false },
     clock: mock.clock(on, { now: 1_000_000 }),
     session: { id: 's1' },
+    envSets: [],
+    failSetFor: {},
   }
   on('session.id', () => ({ value: world.session.id }) as never)
   on('session.cwd', () => ({ value: '/tmp' }) as never)
@@ -268,6 +275,19 @@ async function boot(
     }
     return { value: world.kept[(e as { key: string }).key] } as never
   })
+  on('store.keys', () => ({ value: Object.keys(world.kept) }) as never)
+  // CLAUDE_PID reaches a plugin through hookEnv (the engine sets it for its children only);
+  // CLAUDE_SUB_* are in the process environment claude-sub started it with.
+  on('env.get', (_$, e) => {
+    const name = (e as { name: string }).name
+    return { value: name === 'CLAUDE_PID' ? undefined : options.env?.[name] } as never
+  })
+  on('env.set', (_$, e) => {
+    const a = e as { name: string; value?: string }
+    world.envSets.push(`${a.name}=${a.value ?? ''}`)
+    return { value: {} } as never
+  })
+  on('process.hookEnv', () => ({ value: options.env?.CLAUDE_PID !== undefined ? { CLAUDE_PID: options.env.CLAUDE_PID } : {} }) as never)
   let lockedFor = options.storeLockedFor ?? 0
   on('store.set', (_$, e) => {
     if (options.storeBroken === true) throw new Error('store full')
@@ -276,6 +296,11 @@ async function boot(
       throw new Error('$.store.set failed: Lock file is already being held')
     }
     const one = e as { key: string; value: unknown }
+    const fails = world.failSetFor[one.key] ?? 0
+    if (fails > 0) {
+      world.failSetFor[one.key] = fails - 1
+      throw new Error('$.store.set failed: Lock file is already being held')
+    }
     world.kept[one.key] = JSON.parse(JSON.stringify(one.value))
     world.sets.push({ key: one.key, value: world.kept[one.key] })
     return { value: undefined } as never
@@ -1204,4 +1229,251 @@ test("XR9 the owner sends only the answers it was asked for, and a pane where no
   await world.clock.advance(WATCH)
   await settle()
   expect(world.toasts.some(t => t.includes('A3'))).toBe(false)
+})
+
+// --- Subsessions in another folder ------------------------------------------------
+// A subsession (claude-sub) runs with CLAUDE_SUB_PARENT = the pid of the session
+// that started it and CLAUDE_SUB_NAME = its name. Its items carry both, and the
+// pane of the session with that pid shows them beside its own, wherever the
+// subsession's folder is. An answer goes straight to the subsession.
+
+const MAIN = { CLAUDE_PID: '15790' }
+const kidItem = (id: string, text: string, verdict = 'open', extra: object = {}) =>
+  one(id, text, verdict, { owner: 'kid1', parent: '15790', from: 'jbei-mudar-valor', at: 1_000_100, createdAt: 1_000_100, ...extra })
+const kidKey = 'assumptions:/work/jbei'
+
+test('SB1 a subsession marks its items with the session that started it and its name', async ($, on) => {
+  const world = await boot($, on, { cwd: '/work/jbei', env: { CLAUDE_PID: '82281', CLAUDE_SUB_PARENT: '15790', CLAUDE_SUB_NAME: 'jbei-mudar-valor' } })
+  await logAssumption($, 'Use the 2025 price table')
+  const saved = world.kept['assumptions:/work/jbei'] as { items: { parent?: string; from?: string }[] }
+  expect(saved.items[0]?.parent).toBe('15790')
+  expect(saved.items[0]?.from).toBe('jbei-mudar-valor')
+  // Its own pane still lists it as its own.
+  const ui = await ownPane($, 'terminal')
+  expect(await ui.find({ key: 'right-A1' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^  jbei-mudar-valor$/ })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('SB2 the main session lists its subsession items from another folder, with the subsession name', async ($, on) => {
+  const world = await boot($, on, {
+    env: MAIN,
+    stored: { [kidKey]: { items: [kidItem('A1', 'Use the 2025 price table')], nextId: 2, owners: { kid1: 1_000_000 } } },
+  })
+  await logAssumption($, 'My own one')
+  await world.clock.advance(WATCH)
+  await settle()
+  const ui = await ownPane($, 'terminal')
+  expect(await ui.find({ type: 'Text', text: /A1 My own one/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /A1 Use the 2025 price table/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^  jbei-mudar-valor$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^  other session$/ })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: 'Assumptions · 2 open' })).toBeDefined()
+  // Its own folder's list is not changed by showing them.
+  expect(savedAt(world).items.map(a => a.text)).toEqual(['My own one'])
+  await ui.unmount()
+})
+
+test('SB3 subsession items do not show in the pane of a session that did not start it', async ($, on) => {
+  const world = await boot($, on, {
+    env: { CLAUDE_PID: '99999' },
+    stored: { [kidKey]: { items: [kidItem('A1', 'Use the 2025 price table')], nextId: 2, owners: { kid1: 1_000_000 } } },
+  })
+  await world.clock.advance(WATCH)
+  await settle()
+  const ui = await ownPane($, 'terminal')
+  expect(await ui.find({ type: 'Text', text: /Use the 2025 price table/ })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('SB4 an answer to a live subsession item goes to that subsession, not to this Claude', async ($, on) => {
+  const world = await boot($, on, {
+    env: MAIN,
+    stored: { [kidKey]: { items: [kidItem('A1', 'Use the 2025 price table')], nextId: 2, owners: { kid1: 1_000_000 } } },
+  })
+  await world.clock.advance(WATCH)
+  await settle()
+  const ui = await ownPane($, 'terminal')
+  await ui.press({ key: 'wrong-A1-kid1' })
+  // The answer is saved in the subsession's own list, where its pane and its Send see it.
+  const theirs = () => (world.kept[kidKey] as { items: { verdict: string; sendAsked?: number }[] }).items[0]
+  expect(theirs()?.verdict).toBe('wrong')
+  await ui.unmount()
+  const again = await ownPane($, 'terminal')
+  expect((await again.find({ key: 'send' }))?.text).toBe('Send 1 to Claude')
+  await again.press({ key: 'send' })
+  expect(world.sent.join('\n')).not.toContain('Use the 2025 price table')
+  expect(typeof theirs()?.sendAsked).toBe('number')
+  expect(world.toasts.some(t => t.includes('jbei-mudar-valor'))).toBe(true)
+  await again.unmount()
+  const third = await ownPane($, 'terminal')
+  expect(await third.find({ type: 'Text', text: /^  jbei-mudar-valor · waiting for its session$/ })).toBeDefined()
+  // The subsession sent it: it leaves its list, and this pane says where it went.
+  world.kept[kidKey] = { ...(world.kept[kidKey] as object), items: [], removed: ['A1@kid1'] }
+  await world.clock.advance(WATCH)
+  await settle()
+  await third.unmount()
+  const fourth = await ownPane($, 'terminal')
+  expect(await fourth.find({ type: 'Text', text: /Use the 2025 price table/ })).toBeUndefined()
+  expect(world.toasts.some(t => t.includes('A1 was sent to Claude in jbei-mudar-valor'))).toBe(true)
+  await fourth.unmount()
+})
+
+test('SB5 the subsession sends the answer the main pane asked for, to its own Claude', async ($, on) => {
+  const world = await boot($, on, {
+    cwd: '/work/jbei',
+    env: { CLAUDE_PID: '82281', CLAUDE_SUB_PARENT: '15790', CLAUDE_SUB_NAME: 'jbei-mudar-valor' },
+    state: { owner: 'kid1' },
+    stored: { [kidKey]: { items: [kidItem('A1', 'Use the 2025 price table', 'wrong', { sendAsked: 1_000_200, at: 1_000_200 })], nextId: 2, owners: { kid1: 1_000_000 } } },
+  })
+  await world.clock.advance(WATCH)
+  await settle()
+  expect(world.sent.join('\n')).toContain('- A1 WRONG: Use the 2025 price table')
+  expect((world.kept[kidKey] as { items: unknown[] }).items).toEqual([])
+})
+
+test('SB6 a subsession that has gone: its item still shows, and Send here delivers it, then it leaves its list', async ($, on) => {
+  const world = await boot($, on, {
+    env: MAIN,
+    // Last heartbeat long ago: the subsession is gone.
+    stored: { [kidKey]: { items: [kidItem('A1', 'Use the 2025 price table', 'wrong')], nextId: 2, owners: { kid1: 100_000 } } },
+  })
+  await world.clock.advance(WATCH)
+  await settle()
+  const ui = await ownPane($, 'terminal')
+  expect(await ui.find({ type: 'Text', text: /A1 Use the 2025 price table/ })).toBeDefined()
+  expect((await ui.find({ key: 'send' }))?.text).toBe('Send 1 to Claude')
+  await ui.press({ key: 'send' })
+  expect(world.sent.join('\n')).toContain('- [jbei-mudar-valor] A1 WRONG: Use the 2025 price table')
+  const theirs = world.kept[kidKey] as { items: unknown[]; removed: string[] }
+  expect(theirs.items).toEqual([])
+  expect(theirs.removed).toContain('A1@kid1')
+  await ui.unmount()
+})
+
+test('SB7 Clear all in the main pane also clears the subsession items it shows', async ($, on) => {
+  const world = await boot($, on, {
+    env: MAIN,
+    stored: { [kidKey]: { items: [kidItem('A1', 'Use the 2025 price table')], nextId: 2, owners: { kid1: 1_000_000 } } },
+  })
+  await world.clock.advance(WATCH)
+  await settle()
+  await $.command.run({ command: 'assumptions', args: 'clear' } as never)
+  const theirs = world.kept[kidKey] as { items: unknown[]; removed: string[] }
+  expect(theirs.items).toEqual([])
+  expect(theirs.removed).toContain('A1@kid1')
+})
+
+test('SB8 an item under this pid logged before this process started is an older process\'s, and does not show', async ($, on) => {
+  const world = await boot($, on, {
+    env: MAIN,
+    stored: { [kidKey]: { items: [kidItem('A1', 'From last week', 'open', { at: 500_000, createdAt: 500_000 })], nextId: 2, owners: {} } },
+  })
+  await world.clock.advance(WATCH)
+  await settle()
+  const ui = await ownPane($, 'terminal')
+  expect(await ui.find({ type: 'Text', text: /From last week/ })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('SB9 "All open are right" in the main pane marks the subsession items it shows, in their own list', async ($, on) => {
+  const world = await boot($, on, {
+    env: MAIN,
+    stored: { [kidKey]: { items: [kidItem('A1', 'Use the 2025 price table')], nextId: 2, owners: { kid1: 1_000_000 } } },
+  })
+  await world.clock.advance(WATCH)
+  await settle()
+  const ui = await ownPane($, 'terminal')
+  await ui.press({ key: 'all-right' })
+  expect((world.kept[kidKey] as { items: { verdict: string }[] }).items[0]?.verdict).toBe('right')
+  await ui.unmount()
+})
+
+test('SB10 an answer the subsession saved over from an older read is written again', async ($, on) => {
+  const world = await boot($, on, {
+    env: MAIN,
+    stored: { [kidKey]: { items: [kidItem('A1', 'Use the 2025 price table')], nextId: 2, owners: { kid1: 1_000_000 } } },
+  })
+  await world.clock.advance(WATCH)
+  await settle()
+  const ui = await ownPane($, 'terminal')
+  await ui.press({ key: 'wrong-A1-kid1' })
+  await ui.unmount()
+  // The subsession saves the list it read before the answer landed.
+  world.kept[kidKey] = { items: [kidItem('A1', 'Use the 2025 price table')], nextId: 2, owners: { kid1: 1_000_000 } }
+  await world.clock.advance(WATCH)
+  await settle()
+  expect((world.kept[kidKey] as { items: { verdict: string }[] }).items[0]?.verdict).toBe('wrong')
+  const again = await ownPane($, 'terminal')
+  expect((await again.find({ key: 'send' }))?.text).toBe('Send 1 to Claude')
+  await again.unmount()
+})
+
+test('SB11 an answer that could not be saved in the subsession list (lock held) is saved on a later pull', async ($, on) => {
+  const world = await boot($, on, {
+    env: MAIN,
+    stored: { [kidKey]: { items: [kidItem('A1', 'Use the 2025 price table')], nextId: 2, owners: { kid1: 1_000_000 } } },
+  })
+  await world.clock.advance(WATCH)
+  await settle()
+  const ui = await ownPane($, 'terminal')
+  // The next write of the subsession's key fails.
+  world.failSetFor[kidKey] = 1
+  await ui.press({ key: 'wrong-A1-kid1' })
+  expect((world.kept[kidKey] as { items: { verdict: string }[] }).items[0]?.verdict).toBe('open')
+  await world.clock.advance(WATCH)
+  await settle()
+  expect((world.kept[kidKey] as { items: { verdict: string }[] }).items[0]?.verdict).toBe('wrong')
+  await ui.unmount()
+})
+
+test('SB12 a subsession takes its two variables out of the environment and keeps them across a reload', async ($, on) => {
+  const world = await boot($, on, { cwd: '/work/jbei', env: { CLAUDE_PID: '82281', CLAUDE_SUB_PARENT: '15790', CLAUDE_SUB_NAME: 'jbei-mudar-valor' } })
+  expect(world.envSets).toEqual(['CLAUDE_SUB_PARENT=', 'CLAUDE_SUB_NAME='])
+})
+
+test('SB13 after a reload, with the variables gone from the environment, a subsession still marks its items', async ($, on) => {
+  const world = await boot($, on, {
+    cwd: '/work/jbei',
+    env: { CLAUDE_PID: '82281' },
+    state: { owner: 'kid1', storeKey: kidKey, sub: { parent: '15790', name: 'jbei-mudar-valor' } },
+  })
+  await logAssumption($, 'After the reload')
+  const saved = world.kept[kidKey] as { items: { parent?: string; from?: string }[] }
+  expect(saved.items[0]?.parent).toBe('15790')
+  expect(saved.items[0]?.from).toBe('jbei-mudar-valor')
+})
+
+test('SB14 a typed prompt that sends a late subsession answer from here takes back its ask first', async ($, on) => {
+  const world = await boot($, on, {
+    env: MAIN,
+    // Handed to the subsession 20 s ago; it beats but never sent it.
+    stored: { [kidKey]: { items: [kidItem('A1', 'Use the 2025 price table', 'wrong', { sendAsked: 980_000, at: 980_000 })], nextId: 2, owners: { kid1: 1_000_000 } } },
+  })
+  await world.clock.advance(WATCH)
+  await settle()
+  await $.prompt.submit(TYPED)
+  expect(world.contexts.at(-1)?.join('\n')).toContain('- [jbei-mudar-valor] A1 WRONG: Use the 2025 price table')
+  const theirs = world.kept[kidKey] as { items: { sendAsked?: number }[]; removed: string[] }
+  expect(theirs.items).toEqual([])
+  expect(theirs.removed).toContain('A1@kid1')
+  expect(world.sets.some(x => x.key === kidKey && (x.value as { items: { sendAsked?: number }[] }).items.some(a => a.sendAsked === undefined))).toBe(true)
+})
+
+test('SB15 in the stack, subsession rows take their turn with the own rows, in the order logged', async ($, on) => {
+  const own = Array.from({ length: 6 }, (_, i) => one(`A${i + 1}`, `Own ${i + 1}`, 'open', { at: 1_000_200 + i, createdAt: 1_000_200 + i }))
+  sectionBeneath(on)
+  const world = await boot($, on, {
+    env: MAIN,
+    host: true,
+    stored: {
+      'assumptions:/tmp': { items: own, nextId: 7 },
+      [kidKey]: { items: [kidItem('A1', 'Kid first', 'open', { at: 1_000_100, createdAt: 1_000_100 })], nextId: 2, owners: { kid1: 1_000_000 } },
+    },
+  })
+  await world.clock.advance(WATCH)
+  await settle()
+  const ui = await $.ui.mount({ surface: 'terminal', ...STACK })
+  expect(await ui.find({ type: 'Text', text: /A1 Kid first/ })).toBeDefined()
+  await ui.unmount()
 })

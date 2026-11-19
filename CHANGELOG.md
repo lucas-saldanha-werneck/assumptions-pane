@@ -2,6 +2,12 @@
 
 Versions are the `version` in `.claude-plugin/plugin.json`. Newest first.
 
+## 0.6.0 (2026-11-19)
+
+- The session that started a subsession (claude-sub 0.2.2 or later) lists the subsession's assumptions beside its own, in any folder, each with the subsession's name instead of "other session". Before, only a subsession in the same folder showed. Other sessions do not see them.
+- An answer to a subsession's item is saved in the subsession's own list and Send hands it straight to the subsession, which sends it to its own Claude. A subsession that has gone (no heartbeat for 3 minutes) or has not sent it after 15 s: Send here sends it, named with the subsession. "All open are right" and "Clear all" act on those rows too.
+- The session's pid is read through `$.process.hookEnv()` (CLAUDE_PID is not in a plugin's own environment); the subsession's `CLAUDE_SUB_PARENT` and `CLAUDE_SUB_NAME` through `$.env.get`.
+
 ## 0.5.2 (2026-11-19)
 
 - Send shows, and counts, answers to items another session in the same folder logged (a subsession counts): it hands them to that session, which sends them to its own Claude within a couple of seconds. Before, Send counted only this session's own answers, so with only the other session's items answered there was no Send button, and "mark all" sent only some.

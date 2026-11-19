@@ -17,7 +17,15 @@ export type Assumption = {
   told?: boolean
   // Send was pressed for it in another session's pane (when): its owner sends it.
   sendAsked?: number
+  // Logged in a subsession (claude-sub): the pid of the session that started it
+  // (CLAUDE_SUB_PARENT), whose pane also lists it, and the subsession's name.
+  parent?: string
+  from?: string
 }
+
+// A subsession's item shown in the pane of the session that started it: where
+// it is saved (the subsession folder's store key) and when its owner last beat.
+export type Kid = Assumption & { home: string; seen: number }
 
 declare module 'claude-code' {
   interface PluginState {
@@ -44,6 +52,12 @@ declare module 'claude-code' {
       showStack: number
       // This process's owner mark, kept across a reload of the module.
       owner: string | null
+      // Items of the subsessions this session started, saved in other folders.
+      kids: Kid[]
+      // When this process first started (ms): an older item under its pid is a past process's.
+      startedAt: number | null
+      // In a subsession: the session that started it (pid) and its name, from claude-sub.
+      sub: { parent: string; name: string } | null
     }
     'side-stack': { shownBy: Record<string, number> }
   }
