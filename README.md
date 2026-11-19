@@ -130,7 +130,8 @@ also loads in the desktop app's local Code sessions.
 - If you type a normal prompt instead, any answers not sent yet go along with it. If that prompt
   is blocked and does not reach Claude, your answers stay in the pane. Only a prompt you send
   (terminal, desktop app, phone) takes them: a background task's notification or another
-  session's message leaves them in the pane.
+  session's message leaves them in the pane. In a subsession, which you rarely type into, press
+  Send: the main session's messages do not take the answers along.
 - Answered items leave the list once Claude has them. Open items stay. If you change an answer
   while the review waits, the new answer stays in the pane so you can send it.
 - Numbers keep counting after a clear and after a reload, so "A3" always means one item.

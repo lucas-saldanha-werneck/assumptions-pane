@@ -1,5 +1,5 @@
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, Register, ResolveInput } from 'claude-code'
+import type { EngineInterface, PromptOrigin, Register, ResolveInput } from 'claude-code'
 
 import type { Assumption, Kid } from '../types'
 import { inTurnNote, kidMarksContext, marksContext, parsePhoneReply, phoneListContext } from './phone'
@@ -816,10 +816,12 @@ const reviewLine = (a: Assumption): string => {
 }
 
 // Prompts the person sent: typed in the terminal (composer), in the desktop app
-// (sdk), on the phone (bridge), or from Slack (slack-ping). No origin at all
-// (an older engine) counts as the person's.
-const PERSON_ORIGINS: readonly string[] = ['composer', 'sdk', 'bridge', 'slack-ping']
-const fromPerson = (kind: string | undefined): boolean => kind === undefined || PERSON_ORIGINS.includes(kind)
+// (sdk), on the phone (bridge), or from Slack (slack-ping). A prompt with no
+// origin is not counted as the person's: the engine stamps every prompt, and a
+// hook beneath that dropped it must not let a notification take the answers.
+const PERSON_ORIGINS: readonly PromptOrigin['kind'][] = ['composer', 'sdk', 'bridge', 'slack-ping']
+const fromPerson = (kind: string | undefined): boolean =>
+  kind !== undefined && (PERSON_ORIGINS as readonly string[]).includes(kind)
 
 const REVIEW_HEAD = 'Assumption review:'
 const reviewText = (list: Assumption[]): string => [REVIEW_HEAD, ...list.map(reviewLine)].join('\n')

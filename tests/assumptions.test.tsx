@@ -929,9 +929,11 @@ test('AP-11 answers not sent yet wait for the person: a task notification or ano
   const ui = await ownPane($, 'terminal')
   await ui.press({ key: 'wrong-A1' })
   await ui.press({ key: 'right-A2' })
-  for (const kind of ['task-notification', 'peer', 'peer-send-message', 'scheduled-trigger', 'unclassified', 'auto-continuation', 'coordinator']) {
-    await $.prompt.submit({ text: `<${kind}>`, origin: { kind } } as never)
-    expect(world.contexts.at(-1)?.join('\n') ?? '').not.toContain('Assumption review')
+  const kinds = ['task-notification', 'peer', 'peer-send-message', 'scheduled-trigger', 'unclassified', 'auto-continuation', 'coordinator', 'projects-relay', 'observer', undefined]
+  for (const kind of kinds) {
+    const before = world.contexts.length
+    await $.prompt.submit({ text: `<${kind ?? 'no origin'}>`, ...(kind === undefined ? {} : { origin: { kind } }) } as never)
+    expect(world.contexts.slice(before).flat().join('\n')).not.toContain('Assumption review')
   }
   expect(await ui.find({ key: 'right-A1' })).toBeDefined()
   expect(await ui.find({ key: 'send' })).toBeDefined()
@@ -1604,7 +1606,21 @@ test('AP-12 a subsession does not send, with the main session\'s message, the an
   })
   await world.clock.advance(WATCH)
   await settle()
+  const before = world.contexts.length
   await $.prompt.submit({ text: 'Merged when CI is green. You can stop.', origin: { kind: 'peer' } } as never)
-  expect(world.contexts.at(-1)?.join('\n') ?? '').not.toContain('Use the 2025 price table')
+  expect(world.contexts.slice(before).flat().join('\n')).not.toContain('Use the 2025 price table')
   expect((world.kept[kidKey] as { items: unknown[] }).items).toHaveLength(1)
 })
+
+for (const kind of ['sdk', 'bridge', 'slack-ping'] as const) {
+  test(`AP-13 a prompt the person sent from ${kind} carries the answers`, async ($, on) => {
+    const world = await boot($, on)
+    await logAssumption($, 'Use port 8080')
+    const ui = await ownPane($, 'terminal')
+    await ui.press({ key: 'wrong-A1' })
+    const before = world.contexts.length
+    await $.prompt.submit({ text: 'go on', wait: false, origin: { kind } } as never)
+    expect(world.contexts.slice(before).flat().join('\n')).toContain('A1 WRONG: Use port 8080')
+    await ui.unmount()
+  })
+}
