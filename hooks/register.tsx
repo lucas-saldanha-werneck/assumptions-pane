@@ -1,5 +1,5 @@
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, Register, ResolveInput } from 'claude-code'
+import type { EngineInterface, PromptOrigin, Register, ResolveInput } from 'claude-code'
 
 import type { Assumption, Kid } from '../types'
 import { inTurnNote, kidMarksContext, marksContext, parsePhoneReply, phoneListContext } from './phone'
@@ -815,6 +815,15 @@ const reviewLine = (a: Assumption): string => {
   return `- ${id} WRONG: ${a.text} (do not keep this; ask me if the right choice is not clear)`
 }
 
+// Prompts the person sent: typed in the terminal (composer), in the desktop app
+// (sdk: the app is an SDK host), or on the phone (bridge), as the engine's own
+// person check counts them (a Slack ping or a channel message is not). A prompt with no
+// origin is not counted as the person's: the engine stamps every prompt, and a
+// hook beneath that dropped it must not let a notification take the answers.
+const PERSON_ORIGINS: readonly PromptOrigin['kind'][] = ['composer', 'sdk', 'bridge']
+const fromPerson = (kind: string | undefined): boolean =>
+  kind !== undefined && (PERSON_ORIGINS as readonly string[]).includes(kind)
+
 const REVIEW_HEAD = 'Assumption review:'
 const reviewText = (list: Assumption[]): string => [REVIEW_HEAD, ...list.map(reviewLine)].join('\n')
 
@@ -1353,8 +1362,8 @@ export const register: Register = (on, options) => {
     return { result: `Logged as ${id}. Keep working; the person may correct it later.` }
   }).catch(($, e, next) => next(e))
 
-  // A typed prompt carries any answers not sent yet. They leave the pane only
-  // once the prompt has entered; if it is dropped or fails, they stay.
+  // A prompt the person sent carries any answers not sent yet. They leave the
+  // pane only once the prompt has entered; if it is dropped or fails, they stay.
   on('prompt.submit', async ($, e, next) => {
     await ensureSession($).catch(() => undefined)
     notePrompt(e.origin?.kind)
@@ -1370,6 +1379,11 @@ export const register: Register = (on, options) => {
     // A slash command (/model, /clear, a skill) is not a message Claude reads
     // as-is: the answers wait for the next prompt.
     if (e.command !== undefined) return next(e)
+    // Only the person's own message carries the answers. A background task's
+    // notification, another session's message (a subsession's report, the main
+    // session's SendMessage) or a scheduled prompt can enter at any moment, also
+    // mid-turn, and would take answers the person is still giving.
+    if (!fromPerson(e.origin?.kind)) return next(e)
     // On the phone: the reply's marks and the assumptions to tell are saved only
     // once the prompt got through (no drop), as a review is.
     let phone: PhonePlan | null = null

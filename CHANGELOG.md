@@ -2,6 +2,10 @@
 
 Versions are the `version` in `.claude-plugin/plugin.json`. Newest first.
 
+## 0.6.2 (2026-11-19)
+
+- Answers marked and not sent yet stay in the pane until you press Send or send a prompt yourself (typed in the terminal or the desktop app, or on the phone). Before, any prompt took them along, also a background task's notification, a subsession's message or the main session's message to a subsession, which can arrive mid-turn: the answers left the pane while they were still being given.
+
 ## 0.6.1 (2026-11-19)
 
 - On the phone (Remote Control), the session that started subsessions (claude-sub) also lists their open assumptions at the end of its reply, each with the subsession's name: `jbei-extras A3 – …`. Its own items keep plain ids (`A3`).
