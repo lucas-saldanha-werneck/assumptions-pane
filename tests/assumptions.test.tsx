@@ -1154,6 +1154,54 @@ test("XR7 another session's items show without an event here, and one it sent sa
   await world.clock.advance(WATCH)
   await settle()
   expect(await ui.find({ type: 'Text', text: /A1 From the subsession/ })).toBeUndefined()
-  expect(world.toasts.some(t => t.includes('A1 reached the session that logged it'))).toBe(true)
+  expect(world.toasts.some(t => t.includes('A1 was sent to Claude from another session in this folder'))).toBe(true)
   await ui.unmount()
+})
+
+test('XR8 an answer handed to a session that never sends it can be sent from here after a while', async ($, on) => {
+  // The other session runs an older version: it beats, but ignores the ask.
+  const world = await boot($, on, {
+    stored: { 'assumptions:/tmp': { items: [one('A1', 'Theirs', 'wrong', { owner: 'live' })], nextId: 2, owners: { live: 1_000_000 } } },
+  })
+  const ui = await ownPane($, 'terminal')
+  await ui.press({ key: 'send' })
+  expect(world.sent.join('\n')).not.toContain('A1 WRONG')
+  await world.clock.advance(16_000)
+  await ui.unmount()
+  const again = await ownPane($, 'terminal')
+  expect((await again.find({ key: 'send' }))?.text).toBe('Send 1 to Claude')
+  await again.press({ key: 'send' })
+  expect(world.sent.join('\n')).toContain('- A1 WRONG: Theirs')
+  await again.unmount()
+})
+
+test("XR9 the owner sends only the answers it was asked for, and a pane where nothing was answered says nothing", async ($, on) => {
+  const world = await boot($, on, {
+    state: { owner: 'me1' },
+    stored: {
+      'assumptions:/tmp': {
+        items: [
+          one('A1', 'Asked', 'wrong', { owner: 'me1', sendAsked: 999_000, at: 999_000 }),
+          one('A2', 'Answered here, not sent', 'right', { owner: 'me1', at: 999_000 }),
+          one('A3', 'Third session', 'wrong', { owner: 'third', at: 999_000 }),
+        ],
+        nextId: 4,
+        owners: { me1: 1_000_000, third: 1_000_000 },
+      },
+    },
+  })
+  await world.clock.advance(WATCH)
+  await settle()
+  const text = world.sent.join('\n')
+  expect(text).toContain('- A1 WRONG: Asked')
+  expect(text).not.toContain('A2')
+  expect(text).not.toContain('A3')
+  const left = full(world).items as { id: string; sendAsked?: number }[]
+  expect(left.map(a => a.id)).toEqual(['A2', 'A3'])
+  expect(left.every(a => a.sendAsked === undefined)).toBe(true)
+  // The third session sends A3 itself: nothing was answered in this pane, so no toast.
+  world.kept['assumptions:/tmp'] = { ...full(world), items: [left[0]], removed: [...(full(world).removed ?? []), 'A3@third'] }
+  await world.clock.advance(WATCH)
+  await settle()
+  expect(world.toasts.some(t => t.includes('A3'))).toBe(false)
 })

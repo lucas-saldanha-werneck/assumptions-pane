@@ -115,6 +115,11 @@ let phoneListed: string[] = []
 // The saved list as this process last read or wrote it (JSON), so the watch
 // merges only when another session changed it.
 let lastSeen = ''
+// Items answered in this process's pane (uids): only those get the toast when
+// another session sends them.
+const answeredHere = new Set<string>()
+// One watch pull at a time: a slow store read does not pile pulls up.
+let pulling = false
 
 // The identity of an item: its number and the process that logged it.
 const uid = (a: { id: string; owner?: string }): string => (a.owner !== undefined ? `${a.id}@${a.owner}` : a.id)
@@ -124,6 +129,11 @@ const alive = (owner: string, now: number): boolean => owner === OWNER || (owner
 // Answers this session may send: its own, old ones without an owner, and those of an owner that is gone.
 const mine = (a: Assumption, now: number): boolean =>
   a.owner === undefined || a.owner === OWNER || !alive(a.owner, now)
+// Handed to another live session that has not sent it after ASK_MS (its
+// watch did not run, or it runs an older version): this session may send it.
+const ASK_MS = 15_000
+const askStale = (a: Assumption, now: number): boolean => a.sendAsked !== undefined && now - a.sendAsked > ASK_MS
+const canSend = (a: Assumption, now: number): boolean => mine(a, now) || askStale(a, now)
 // A key for drawing: the plain id for this session's rows, the owner added for another's.
 const rowKey = (a: Assumption): string => (a.owner === undefined || a.owner === OWNER ? a.id : `${a.id}-${a.owner}`)
 
@@ -284,11 +294,18 @@ async function currentKey($: EngineInterface): Promise<string | null> {
 function sayDeliveredElsewhere($: EngineInterface, before: Assumption[], after: Assumption[], gone: Set<string>, clearedBefore: number, cleared: number): void {
   if (cleared !== clearedBefore) return
   const left = before.filter(
-    a => a.owner !== undefined && a.owner !== OWNER && unsent([a]).length > 0 && gone.has(uid(a)) && !after.some(b => uid(b) === uid(a)),
+    a =>
+      a.owner !== undefined &&
+      a.owner !== OWNER &&
+      answeredHere.has(uid(a)) &&
+      unsent([a]).length > 0 &&
+      gone.has(uid(a)) &&
+      !after.some(b => uid(b) === uid(a)),
   )
+  for (const a of left) answeredHere.delete(uid(a))
   if (left.length === 0) return
   try {
-    $.ui.toast(`${left.map(a => a.id).join(', ')} reached the session that logged ${left.length === 1 ? 'it' : 'them'}.`)
+    $.ui.toast(`${left.map(a => a.id).join(', ')} ${left.length === 1 ? 'was' : 'were'} sent to Claude from another session in this folder.`)
   } catch {
     // Nowhere to say it.
   }
@@ -373,9 +390,19 @@ const saveItems = ($: EngineInterface): Promise<boolean> => mergeStore($, true)
 // session's pane asked this one to send (Send pressed there, on items this
 // session's Claude logged).
 async function pullStore($: EngineInterface): Promise<void> {
-  if (!(await mergeStore($, false))) return
-  const asked = (await read($, items)).some(a => a.owner === OWNER && a.sendAsked !== undefined && unsent([a]).length > 0)
-  if (asked) await sendNow($)
+  if (pulling) return
+  pulling = true
+  try {
+    if (!(await mergeStore($, false))) return
+    const asked = (await read($, items)).filter(a => a.owner === OWNER && a.sendAsked !== undefined).map(uid)
+    if (asked.length === 0) return
+    // The ask is taken now, whatever the send does, so a dropped send is not retried every tick.
+    const at = await stamp($)
+    await setItems($, l => l.map(a => (asked.includes(uid(a)) ? { ...withoutAsk(a), at } : a)))
+    await sendNow($, asked)
+  } finally {
+    pulling = false
+  }
 }
 
 async function setItems($: EngineInterface, fn: (list: Assumption[]) => Assumption[]): Promise<void> {
@@ -536,6 +563,7 @@ async function drawingState($: EngineInterface): Promise<{ isStacked: boolean; l
 }
 
 const setOne = async ($: EngineInterface, key: string, patch: Partial<Assumption>): Promise<void> => {
+  answeredHere.add(key)
   const at = await stamp($)
   await setItems($, list => list.map(a => (uid(a) === key ? { ...a, ...patch, isSent: false, at } : a)))
   await openPane($)
@@ -555,7 +583,7 @@ const withoutAsk = (a: Assumption): Assumption => {
 // The answers this session sends: not another live session's (they go to that Claude).
 const sendable = async ($: EngineInterface, list: Assumption[]): Promise<Assumption[]> => {
   const now = await nowMs($)
-  return unsent(list).filter(a => mine(a, now))
+  return unsent(list).filter(a => canSend(a, now))
 }
 
 // A RIGHT carries only the id: the text was written by the model, and the person
@@ -608,12 +636,14 @@ const reviewEntered = async ($: EngineInterface, text: string): Promise<void> =>
 // Answers to another live session's items go to that session (its Claude made
 // the assumption): they are marked `sendAsked` in the saved list and that
 // session's watch sends them within a couple of seconds.
-const sendNow = async ($: EngineInterface): Promise<void> => {
+// `only` (asked from another pane): just those, and nothing is handed on.
+const sendNow = async ($: EngineInterface, only?: string[]): Promise<void> => {
   await ensureSession($).catch(() => undefined)
   const waitingIds = await read($, queued)
   const now = await nowMs($)
-  const pending = unsent(await read($, items)).filter(a => !waitingIds.includes(uid(a)))
-  const others = pending.filter(a => !mine(a, now) && a.sendAsked === undefined).map(uid)
+  const pending = unsent(await read($, items)).filter(a => !waitingIds.includes(uid(a)) && (only === undefined || only.includes(uid(a))))
+  const others = only !== undefined ? [] : pending.filter(a => !canSend(a, now) && a.sendAsked === undefined).map(uid)
+  for (const id of others) answeredHere.add(id)
   if (others.length > 0) {
     const at = await stamp($)
     await setItems($, l => l.map(a => (others.includes(uid(a)) ? { ...a, sendAsked: at, at } : a)))
@@ -625,9 +655,9 @@ const sendNow = async ($: EngineInterface): Promise<void> => {
       // The rows say "waiting for its session".
     }
   }
-  const list = pending.filter(a => mine(a, now))
+  const list = pending.filter(a => canSend(a, now))
   if (list.length === 0) {
-    await redraw($)
+    if (others.length > 0) await redraw($)
     return
   }
   const ids = list.map(uid)
@@ -760,9 +790,9 @@ async function drawSection<E extends ResolveInput>($: EngineInterface, e: E, loo
   const now = await nowMs($)
   // Every answer not sent yet counts, another session's too (Send hands those to it),
   // except one already handed over and waiting for that session.
-  const askedIds = new Set(unsent(list).filter(a => a.sendAsked !== undefined && !mine(a, now)).map(uid))
+  const askedIds = new Set(unsent(list).filter(a => a.sendAsked !== undefined && !canSend(a, now)).map(uid))
   const waiting = unsent(list).filter(a => !queuedIds.includes(uid(a)) && !askedIds.has(uid(a))).length
-  const elsewhere = new Set(list.filter(a => !mine(a, now) && !askedIds.has(uid(a))).map(uid))
+  const elsewhere = new Set(unsent(list).filter(a => !canSend(a, now) && !askedIds.has(uid(a))).map(uid))
   const shown = isStacked ? list.slice(0, STACK_ROWS) : list
   const hidden = list.length - shown.length
 
@@ -839,6 +869,7 @@ async function drawSection<E extends ResolveInput>($: EngineInterface, e: E, loo
         <Button key={k('all-right')} plain onPress={async () => {
           // Only rows the person can see: hidden ones are never marked unseen.
           const seen = shown.map(uid)
+          for (const id of seen) answeredHere.add(id)
           const at = await stamp($)
           await setItems($, l => l.map(a => (a.verdict === 'open' && seen.includes(uid(a)) ? { ...a, verdict: 'right' as const, isSent: false, at } : a)))
           await openPane($)
@@ -881,7 +912,7 @@ export const register: Register = (on, options) => {
     // A reload of the module runs session.start again with the shell's current
     // folder (after a `cd`), but the list is the folder the session started in:
     // the key already in state wins.
-    const key = (await read($, storeKey)) ?? lastKey ?? `assumptions:${e.cwd}`
+    const key = (await read($, storeKey)) ?? `assumptions:${e.cwd}`
     lastKey = key
     {
       const kept = await read($, ownerAtom)

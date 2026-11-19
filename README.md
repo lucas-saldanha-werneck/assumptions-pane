@@ -100,9 +100,10 @@ also loads in the desktop app's local Code sessions.
   folder) counts as one of these sessions. Your answer to an item goes to the Claude that logged
   it while that session is open (the row says "other session"): Send counts those answers too
   and hands them to that session, which sends them to its Claude within a couple of seconds (the
-  row says "waiting for its session" meanwhile, and a toast says when they reached it). Once that
-  session has been gone for 3 minutes (it saves a heartbeat once a minute), any session in the
-  folder sends it. The pane picks up what another session in the folder saved within about 1.5 s.
+  row says "waiting for its session" meanwhile, and a toast says when answers given in this pane
+  were sent from another session). If that session has not sent them after 15 seconds (an older
+  version of the mod there), Send here sends them. Once that session has been gone for 3 minutes
+  (it saves a heartbeat once a minute), any session in the folder sends it. The pane picks up what another session in the folder saved within about 1.5 s.
 - A plugin update (or any reload of the mod) keeps the list of the folder the session started in,
   even if Claude's shell has moved to a subfolder since, and keeps the session's own items its own.
 - A slash command (`/model`, `/clear`, a skill) never carries your answers; they go with your
