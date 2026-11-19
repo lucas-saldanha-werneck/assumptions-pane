@@ -40,6 +40,10 @@ const loadedFor = atom({ plugin: 'assumptions-pane', key: 'loadedFor' } as const
 // An older one answers nothing.
 const showStackAtom = atom({ plugin: 'assumptions-pane', key: 'showStack' } as const, 0)
 const shownByAtom = atom({ plugin: 'side-stack', key: 'shownBy' } as const, {} as Record<string, number>)
+// This process's owner mark, kept in state: a reload of the module (a plugin
+// update, /reload-plugins) starts the module over but keeps the state, and a
+// new mark would make the session's own items look like another session's.
+const ownerAtom = atom({ plugin: 'assumptions-pane', key: 'owner' } as const, null)
 
 // In the stack, the section keeps to this many items so it cannot push the
 // other sections off screen. The rest come in as answered ones leave.
@@ -50,7 +54,7 @@ const MAX_REMOVED = 300
 // two items that got the same number, and a correction goes to the Claude that
 // made the assumption. A process saves a heartbeat while it holds items of its
 // own; an owner not seen for ALIVE_MS is gone, and any session sends its answers.
-const OWNER = Math.random().toString(36).slice(2, 10) || 'owner'
+let OWNER = Math.random().toString(36).slice(2, 10) || 'owner'
 const BEAT_MS = 60_000
 const ALIVE_MS = 3 * BEAT_MS
 const OWNER_TTL_MS = 24 * 60 * 60 * 1000
@@ -108,6 +112,9 @@ let lastBeat = 0
 let removedFloor = 0
 // On the phone: the assumptions Claude was last asked to list (uids), which a bare "ok" answers.
 let phoneListed: string[] = []
+// The saved list as this process last read or wrote it (JSON), so the watch
+// merges only when another session changed it.
+let lastSeen = ''
 
 // The identity of an item: its number and the process that logged it.
 const uid = (a: { id: string; owner?: string }): string => (a.owner !== undefined ? `${a.id}@${a.owner}` : a.id)
@@ -271,14 +278,37 @@ async function currentKey($: EngineInterface): Promise<string | null> {
   return lastKey
 }
 
-// Resolves true once the merge landed in state and the store took it.
-function saveItems($: EngineInterface): Promise<boolean> {
+// Answers given here to another session's items that left the list as sent:
+// they reached the session that logged them (its Claude read them), so say so
+// instead of letting them vanish without a word.
+function sayDeliveredElsewhere($: EngineInterface, before: Assumption[], after: Assumption[], gone: Set<string>, clearedBefore: number, cleared: number): void {
+  if (cleared !== clearedBefore) return
+  const left = before.filter(
+    a => a.owner !== undefined && a.owner !== OWNER && unsent([a]).length > 0 && gone.has(uid(a)) && !after.some(b => uid(b) === uid(a)),
+  )
+  if (left.length === 0) return
+  try {
+    $.ui.toast(`${left.map(a => a.id).join(', ')} reached the session that logged ${left.length === 1 ? 'it' : 'them'}.`)
+  } catch {
+    // Nowhere to say it.
+  }
+}
+
+// Merges the saved list into state; with `write`, saves the merge back.
+// Resolves true once the merge landed (and, with `write`, the store took it).
+function mergeStore($: EngineInterface, write: boolean): Promise<boolean> {
   const run = saving.then(async (): Promise<boolean> => {
     try {
       const key = await currentKey($)
       if (key === null) return false
-      const saved = asSaved(await $.store.get(key))
+      const raw = await $.store.get(key)
+      const sig = JSON.stringify(raw ?? null)
+      // Only the watch reads without writing: nothing new from anyone, nothing to merge.
+      if (!write && sig === lastSeen) return true
+      const saved = asSaved(raw)
       const now = await nowMs($)
+      const before = await read($, items)
+      const clearedBefore = await read($, clearedAt)
       removedFloor = Math.max(removedFloor, saved?.floor ?? 0)
       const cleared = await update($, clearedAt, c => Math.max(c, saved?.clearedAt ?? 0))
       const gone = await update($, removed, r => trimRemoved([...new Set([...(saved?.removed ?? []), ...r])]))
@@ -286,18 +316,27 @@ function saveItems($: EngineInterface): Promise<boolean> {
       const floor = removedFloor
       const merged = await update($, items, local => mergeLists(local, saved, goneSet, cleared, floor))
       const next = await update($, nextId, n => Math.max(n, saved?.nextId ?? 1))
+      sayDeliveredElsewhere($, before, merged, goneSet, clearedBefore, cleared)
       // Heartbeats: this process's while it holds items of its own; entries a day old leave.
       const beats = Object.fromEntries(Object.entries(saved?.owners ?? {}).filter(([, t]) => t > now - OWNER_TTL_MS))
+      if (!write) {
+        owners = beats
+        lastSeen = sig
+        return true
+      }
       if (merged.some(a => a.owner === OWNER)) {
         beats[OWNER] = now
         lastBeat = now
       }
       owners = beats
-      await $.store.set(key, { items: merged, nextId: next, clearedAt: cleared, removed: gone, owners: beats, floor })
+      const value = { items: merged, nextId: next, clearedAt: cleared, removed: gone, owners: beats, floor }
+      await $.store.set(key, value)
+      lastSeen = JSON.stringify(value)
       lockRetries = 0
       saveFailed = false
       return true
     } catch (err) {
+      if (!write) return false
       if (lockRetries < LOCK_RETRIES) {
         lockRetries++
         try {
@@ -324,6 +363,19 @@ function saveItems($: EngineInterface): Promise<boolean> {
   })
   saving = run.then(() => undefined)
   return run
+}
+
+const saveItems = ($: EngineInterface): Promise<boolean> => mergeStore($, true)
+
+// The session watch, every WATCH_MS: brings in what another session in this
+// folder saved (its new assumptions, the answers it sent), so the pane shows
+// it without waiting for an event here; then sends the answers another
+// session's pane asked this one to send (Send pressed there, on items this
+// session's Claude logged).
+async function pullStore($: EngineInterface): Promise<void> {
+  if (!(await mergeStore($, false))) return
+  const asked = (await read($, items)).some(a => a.owner === OWNER && a.sendAsked !== undefined && unsent([a]).length > 0)
+  if (asked) await sendNow($)
 }
 
 async function setItems($: EngineInterface, fn: (list: Assumption[]) => Assumption[]): Promise<void> {
@@ -448,6 +500,7 @@ async function ensureSession($: EngineInterface): Promise<void> {
     if (key !== null) {
       lastKey = key
       if ((await read($, storeKey)) === null) await update($, storeKey, () => key)
+      if ((await read($, ownerAtom)) === null) await update($, ownerAtom, () => OWNER)
       if (!(await saveItems($))) return
     }
     const isUp = await hostPresent($)
@@ -493,6 +546,11 @@ const setOne = async ($: EngineInterface, key: string, patch: Partial<Assumption
 // The answers the person gave that Claude has not seen yet.
 const unsent = (list: Assumption[]): Assumption[] =>
   list.filter(a => !a.isSent && (a.verdict !== 'open' || (a.correction ?? '') !== ''))
+
+const withoutAsk = (a: Assumption): Assumption => {
+  const { sendAsked: _asked, ...rest } = a
+  return rest
+}
 
 // The answers this session sends: not another live session's (they go to that Claude).
 const sendable = async ($: EngineInterface, list: Assumption[]): Promise<Assumption[]> => {
@@ -547,12 +605,37 @@ const reviewEntered = async ($: EngineInterface, text: string): Promise<void> =>
 // mid-turn the review waits. Keep the answers in the pane (marked "waiting")
 // until the prompt has entered; if it is dropped or fails, give them back so
 // nothing is lost.
+// Answers to another live session's items go to that session (its Claude made
+// the assumption): they are marked `sendAsked` in the saved list and that
+// session's watch sends them within a couple of seconds.
 const sendNow = async ($: EngineInterface): Promise<void> => {
   await ensureSession($).catch(() => undefined)
   const waitingIds = await read($, queued)
-  const list = (await sendable($, await read($, items))).filter(a => !waitingIds.includes(uid(a)))
-  if (list.length === 0) return
+  const now = await nowMs($)
+  const pending = unsent(await read($, items)).filter(a => !waitingIds.includes(uid(a)))
+  const others = pending.filter(a => !mine(a, now) && a.sendAsked === undefined).map(uid)
+  if (others.length > 0) {
+    const at = await stamp($)
+    await setItems($, l => l.map(a => (others.includes(uid(a)) ? { ...a, sendAsked: at, at } : a)))
+    try {
+      $.ui.toast(
+        `${others.length === 1 ? 'That answer goes' : `Those ${others.length} answers go`} to the other session in this folder that logged ${others.length === 1 ? 'it' : 'them'}.`,
+      )
+    } catch {
+      // The rows say "waiting for its session".
+    }
+  }
+  const list = pending.filter(a => mine(a, now))
+  if (list.length === 0) {
+    await redraw($)
+    return
+  }
   const ids = list.map(uid)
+  // Asked from another pane: the ask is answered now, so a failed send is not retried in a loop.
+  if (list.some(a => a.sendAsked !== undefined)) {
+    const at = await stamp($)
+    await setItems($, l => l.map(a => (ids.includes(uid(a)) && a.sendAsked !== undefined ? { ...withoutAsk(a), at } : a)))
+  }
   await update($, queued, q => [...q, ...ids])
   // Whatever happens below, the ids leave the queue again, so no answer is stuck as "waiting".
   let delivered = false
@@ -674,9 +757,12 @@ async function drawSection<E extends ResolveInput>($: EngineInterface, e: E, loo
   const expanded = (await read($, isExpanded)) ?? list.length > 0
   const queuedIds = await read($, queued)
   const confirm = (await read($, confirmClear)) > 0
-  const sendNowList = await sendable($, list)
-  const waiting = sendNowList.filter(a => !queuedIds.includes(uid(a))).length
-  const elsewhere = new Set(unsent(list).filter(a => !sendNowList.includes(a)).map(uid))
+  const now = await nowMs($)
+  // Every answer not sent yet counts, another session's too (Send hands those to it),
+  // except one already handed over and waiting for that session.
+  const askedIds = new Set(unsent(list).filter(a => a.sendAsked !== undefined && !mine(a, now)).map(uid))
+  const waiting = unsent(list).filter(a => !queuedIds.includes(uid(a)) && !askedIds.has(uid(a))).length
+  const elsewhere = new Set(list.filter(a => !mine(a, now) && !askedIds.has(uid(a))).map(uid))
   const shown = isStacked ? list.slice(0, STACK_ROWS) : list
   const hidden = list.length - shown.length
 
@@ -708,6 +794,7 @@ async function drawSection<E extends ResolveInput>($: EngineInterface, e: E, loo
             {(a.correction ?? '') !== '' && <Text color="warning">  change: {a.correction}</Text>}
             {queuedIds.includes(uid(a)) && <Text dimColor>  waiting</Text>}
             {elsewhere.has(uid(a)) && <Text dimColor>  other session</Text>}
+            {askedIds.has(uid(a)) && <Text dimColor>  waiting for its session</Text>}
             <Box flexDirection="row" gap={1}>
               <Button key={k(`right-${rowKey(a)}`)} label="Right" onPress={() => setOne($, uid(a), { verdict: 'right' })}>
                 <Text color="success">Right</Text>
@@ -744,7 +831,7 @@ async function drawSection<E extends ResolveInput>($: EngineInterface, e: E, loo
             {`Send ${waiting} to Claude`}
           </Button>
         )}
-        {waiting === 0 && queuedIds.length > 0 && (
+        {waiting === 0 && (queuedIds.length > 0 || askedIds.size > 0) && (
           <Button key={k('send')} variant="primary" onPress={() => sendNow($)}>
             Waiting for Claude…
           </Button>
@@ -791,8 +878,16 @@ export const register: Register = (on, options) => {
   const chosen = String((options as Record<string, unknown> | undefined)?.time_format ?? '')
   timeFormat = (TIME_FORMATS as readonly string[]).includes(chosen) ? (chosen as TimeFormat) : 'YYYY-MM-DD HH:MM'
   on('session.start', async ($, e, next) => {
-    const key = `assumptions:${e.cwd}`
+    // A reload of the module runs session.start again with the shell's current
+    // folder (after a `cd`), but the list is the folder the session started in:
+    // the key already in state wins.
+    const key = (await read($, storeKey)) ?? lastKey ?? `assumptions:${e.cwd}`
     lastKey = key
+    {
+      const kept = await read($, ownerAtom)
+      if (kept !== null && kept !== '') OWNER = kept
+      else await update($, ownerAtom, () => OWNER)
+    }
     saving = Promise.resolve()
     saveFailed = false
     {
@@ -838,6 +933,7 @@ export const register: Register = (on, options) => {
         $.clock.every(WATCH_MS, () => {
           void ensureSession($).catch(() => undefined)
           void heartbeat($).catch(() => undefined)
+          void pullStore($).catch(() => undefined)
         })
         watching = true
       } catch {
