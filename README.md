@@ -104,6 +104,17 @@ also loads in the desktop app's local Code sessions.
   were sent from another session). If that session has not sent them after 15 seconds (an older
   version of the mod there), Send here sends them. Once that session has been gone for 3 minutes
   (it saves a heartbeat once a minute), any session in the folder sends it. The pane picks up what another session in the folder saved within about 1.5 s.
+- A subsession started with [subsessions](https://github.com/lucas-saldanha-werneck/subsessions)
+  0.2.2 or later shows its assumptions in the pane of the session that started it too, in any
+  folder, each row with the subsession's name (for example `jbei-mudar-valor`) under it. Only
+  that session sees them; other sessions do not. Your answer is saved in the subsession's own list
+  and Send hands it straight to the subsession, which sends it to its own Claude (the row says
+  `jbei-mudar-valor · waiting for its session` meanwhile, and a toast says when it went). Once the
+  subsession has been gone for 3 minutes, or has not sent a handed-over answer after 15 seconds,
+  Send here sends it to this Claude, named with the subsession (`- jbei-mudar-valor A3 WRONG: …`).
+  "All open are right" and "Clear all" here act on the subsession's rows too. The subsession's own
+  pane keeps working as before. This works through two variables `claude-sub` gives the
+  subsession: `CLAUDE_SUB_PARENT` (the pid of the session that started it) and `CLAUDE_SUB_NAME`.
 - A plugin update (or any reload of the mod) keeps the list of the folder the session started in,
   even if Claude's shell has moved to a subfolder since, and keeps the session's own items its own.
 - A slash command (`/model`, `/clear`, a skill) never carries your answers; they go with your
@@ -261,6 +272,12 @@ From a shell, the same commands work with `claude plugin` in place of `/plugin`.
   back into the new session and numbering goes on. Not tried by hand in the desktop app. A folder that was emptied keeps a small
   record (its next number and the time of the clear) in the store so numbers go on and an old
   session cannot bring cleared items back.
+- Subsession items in the starting session's pane were tried by hand in tmux (Claude Code
+  2.1.327): a main session and a subsession in another folder started by `claude-sub`; the main
+  pane listed the subsession's item with its name, an answer written to the subsession's list with
+  `sendAsked` reached the subsession's Claude, and the row left the main pane. Pressing the
+  buttons was tested in the test kit only. On the phone (Remote Control), Claude tells only the
+  session's own assumptions, not its subsessions'.
 - Not tested on the mobile app. A mobile app that does not draw text fields shows nothing for
   Change…, and the mod cannot tell. Use Right or Wrong there and type the fix in the prompt box.
 - The list keeps about 100 items. When it is full, the oldest items with nothing to send leave
