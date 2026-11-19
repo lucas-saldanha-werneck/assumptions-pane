@@ -56,6 +56,8 @@ declare module 'claude-code' {
       kids: Kid[]
       // When this process first started (ms): an older item under its pid is a past process's.
       startedAt: number | null
+      // In a subsession: the session that started it (pid) and its name, from claude-sub.
+      sub: { parent: string; name: string } | null
     }
     'side-stack': { shownBy: Record<string, number> }
   }

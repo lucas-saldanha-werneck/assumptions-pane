@@ -50,6 +50,9 @@ const ownerAtom = atom({ plugin: 'assumptions-pane', key: 'owner' } as const, nu
 const kidsAtom = atom({ plugin: 'assumptions-pane', key: 'kids' } as const, [] as Kid[])
 // When this process first started, kept across a reload of the module.
 const startedAtAtom = atom({ plugin: 'assumptions-pane', key: 'startedAt' } as const, null)
+// In a subsession: the session that started it and its name, read once from the
+// environment at the first session start (then taken out of it).
+const subAtom = atom({ plugin: 'assumptions-pane', key: 'sub' } as const, null)
 
 // In the stack, the section keeps to this many items so it cannot push the
 // other sections off screen. The rest come in as answered ones leave.
@@ -448,21 +451,52 @@ async function readEnv($: EngineInterface): Promise<void> {
   // CLAUDE_PID is not in this process's own environment: the engine gives it to
   // the processes it starts, and hookEnv hands the same variables to a plugin.
   MY_PID = await envValue(async () => (await $.process.hookEnv()).CLAUDE_PID)
-  SUB_PARENT = await envValue(() => $.env.get('CLAUDE_SUB_PARENT'))
-  SUB_NAME = await envValue(() => $.env.get('CLAUDE_SUB_NAME'))
-  if (SUB_PARENT !== null && SUB_PARENT === MY_PID) SUB_PARENT = null
+  const parent = await envValue(() => $.env.get('CLAUDE_SUB_PARENT'))
+  const name = await envValue(() => $.env.get('CLAUDE_SUB_NAME'))
+  if (parent !== null) {
+    // Kept in state (a reload of the module) and in the module (a /clear), and
+    // taken out of the environment, so a claude this subsession starts (a
+    // `claude -p` from Bash) does not pass for the same subsession.
+    await update($, subAtom, () => ({ parent, name: name ?? '' }))
+    for (const unset of [() => $.env.set('CLAUDE_SUB_PARENT', undefined), () => $.env.set('CLAUDE_SUB_NAME', undefined)]) {
+      try {
+        await unset()
+      } catch {
+        // It stays set: nothing else depends on it.
+      }
+    }
+  }
+  const sub = parent !== null ? { parent, name: name ?? '' } : ((await read($, subAtom)) ?? (SUB_PARENT !== null ? { parent: SUB_PARENT, name: SUB_NAME ?? '' } : null))
+  SUB_PARENT = sub !== null && sub.parent !== MY_PID ? sub.parent : null
+  SUB_NAME = sub !== null && sub.name !== '' ? sub.name : null
 }
 
 // The last part of the folder a key names ("assumptions:/work/jbei" -> "jbei").
 const folderName = (key: string | null): string => (key ?? '').replace(/^assumptions:/, '').split(/[\\/]/).filter(Boolean).pop() ?? 'subsession'
 
+// Changes made here to subsession items that their lists may not hold yet: the
+// write waits behind this session's saves, may fail (the store's lock), or the
+// subsession may save over it from an older read. Each is applied again on
+// every pull until the subsession's list shows it.
+const kidWants = new Map<string, Assumption>()
+const kidDrops = new Map<string, string>()
+// The full read of every folder's list runs every KIDS_EVERY watch ticks while
+// no subsession item shows here, every tick while one does.
+const KIDS_EVERY = 4
+let kidTicks = 0
+
 // Reads the subsessions' items from the other folders' lists into `kids`.
-async function pullKids($: EngineInterface): Promise<void> {
+// `force`: now, whatever the tick.
+async function pullKids($: EngineInterface, force = false): Promise<void> {
   if (MY_PID === null) return
+  const shown = await read($, kidsAtom)
+  kidTicks++
+  if (!force && shown.length === 0 && kidWants.size === 0 && kidDrops.size === 0 && kidTicks % KIDS_EVERY !== 1) return
   const own = await currentKey($)
   const keys = await $.store.keys()
   const found: Kid[] = []
   const goneIn = new Map<string, Set<string>>()
+  const redo = new Set<string>()
   for (const key of keys) {
     if (!key.startsWith('assumptions:') || key === own) continue
     let saved: Saved | undefined
@@ -472,18 +506,34 @@ async function pullKids($: EngineInterface): Promise<void> {
       continue
     }
     if (saved === undefined) continue
-    goneIn.set(key, new Set(saved.removed))
+    const gone = new Set(saved.removed)
+    goneIn.set(key, gone)
+    for (const [k, home] of kidDrops) if (home === key && (gone.has(k) || !saved.items.some(a => uid(a) === k))) kidDrops.delete(k)
     if (!saved.items.some(a => a.parent === MY_PID)) continue
-    for (const a of mergeLists([], saved, new Set(saved.removed), saved.clearedAt, saved.floor)) {
+    for (const a of mergeLists([], saved, gone, saved.clearedAt, saved.floor)) {
       if (a.parent !== MY_PID) continue
       if (processStart > 0 && (a.createdAt ?? a.at ?? processStart) < processStart) continue
-      found.push({ ...a, home: key, seen: a.owner !== undefined ? (saved.owners[a.owner] ?? 0) : 0 })
+      if (kidDrops.has(uid(a))) {
+        redo.add(key)
+        continue
+      }
+      const want = kidWants.get(uid(a))
+      let item: Assumption = a
+      if (want !== undefined) {
+        if ((a.at ?? 0) >= (want.at ?? 0)) kidWants.delete(uid(a))
+        else {
+          item = want
+          redo.add(key)
+        }
+      }
+      found.push({ ...item, home: key, seen: a.owner !== undefined ? (saved.owners[a.owner] ?? 0) : 0 })
     }
   }
-  const before = await read($, kidsAtom)
-  if (JSON.stringify(before) === JSON.stringify(found)) return
+  // Changes their lists do not hold yet: written again.
+  for (const home of redo) await writeKids($, home)
+  if (JSON.stringify(shown) === JSON.stringify(found)) return
   // Answers given here that the subsession sent to its Claude: say where they went.
-  const left = before.filter(
+  const left = shown.filter(
     k => answeredHere.has(uid(k)) && unsent([k]).length > 0 && goneIn.get(k.home)?.has(uid(k)) === true && !found.some(f => uid(f) === uid(k)),
   )
   for (const k of left) answeredHere.delete(uid(k))
@@ -497,15 +547,24 @@ async function pullKids($: EngineInterface): Promise<void> {
   }
 }
 
-// Changes a subsession's saved list (another folder's key), in turn with this
-// session's own saves. Its other fields are kept.
-function writeHome($: EngineInterface, home: string, change: (s: Saved) => Partial<Saved>): Promise<boolean> {
+// Writes this session's pending changes into one subsession's saved list
+// (another folder's key), in turn with this session's own saves; the list's
+// other fields and items are kept. A failed write is tried again on the next pull.
+function writeKids($: EngineInterface, home: string): Promise<boolean> {
   const run = saving.then(async (): Promise<boolean> => {
     try {
       const raw = await $.store.get(home)
       const saved = asSaved(raw)
       if (saved === undefined) return false
-      await $.store.set(home, { ...(raw as object), ...change(saved) })
+      const drops = [...kidDrops].filter(([, h]) => h === home).map(([k]) => k)
+      const list = saved.items
+        .filter(a => !drops.includes(uid(a)))
+        .map(a => {
+          const want = kidWants.get(uid(a))
+          return want !== undefined && (a.at ?? 0) < (want.at ?? 0) ? want : a
+        })
+      const removed = drops.length > 0 ? [...new Set([...saved.removed, ...drops])].slice(-MAX_REMOVED) : saved.removed
+      await $.store.set(home, { ...(raw as object), items: list, removed })
       return true
     } catch {
       return false
@@ -516,13 +575,20 @@ function writeHome($: EngineInterface, home: string, change: (s: Saved) => Parti
 }
 
 // Applies `fn` to the subsession items named by uid, here and in their own lists.
+// The change gets a time above the item's own, so the subsession's merge keeps it.
 async function setKids($: EngineInterface, keys: string[], fn: (a: Assumption) => Assumption): Promise<void> {
   const kids = (await read($, kidsAtom)).filter(k => keys.includes(uid(k)))
   if (kids.length === 0) return
-  await update($, kidsAtom, l => l.map(k => (keys.includes(uid(k)) ? { ...fn(k), home: k.home, seen: k.seen } : k)))
-  for (const home of new Set(kids.map(k => k.home))) {
-    await writeHome($, home, s => ({ items: s.items.map(a => (keys.includes(uid(a)) ? fn(a) : a)) }))
+  const at = await stamp($)
+  const changed = new Map<string, Kid>()
+  for (const k of kids) {
+    const { home, seen, ...item } = k
+    const want: Assumption = { ...fn(item), at: Math.max(at, (k.at ?? 0) + 1) }
+    kidWants.set(uid(k), want)
+    changed.set(uid(k), { ...want, home, seen })
   }
+  await update($, kidsAtom, l => l.map(k => changed.get(uid(k)) ?? k))
+  for (const home of new Set(kids.map(k => k.home))) await writeKids($, home)
 }
 
 // Subsession items that left (delivered from here, or cleared): out of their
@@ -531,14 +597,13 @@ async function dropKids($: EngineInterface, gone: Kid[], keep: (k: Kid) => boole
   const out = gone.filter(k => !keep(k))
   if (out.length === 0) return
   const keys = out.map(uid)
-  for (const k of keys) answeredHere.delete(k)
-  await update($, kidsAtom, l => l.filter(k => !keys.includes(uid(k))))
-  for (const home of new Set(out.map(k => k.home))) {
-    await writeHome($, home, s => ({
-      items: s.items.filter(a => !keys.includes(uid(a))),
-      removed: [...new Set([...s.removed, ...keys])].slice(-MAX_REMOVED),
-    }))
+  for (const k of out) {
+    answeredHere.delete(uid(k))
+    kidWants.delete(uid(k))
+    kidDrops.set(uid(k), k.home)
   }
+  await update($, kidsAtom, l => l.filter(k => !keys.includes(uid(k))))
+  for (const home of new Set(out.map(k => k.home))) await writeKids($, home)
 }
 
 async function setItems($: EngineInterface, fn: (list: Assumption[]) => Assumption[]): Promise<void> {
@@ -705,7 +770,7 @@ const setOne = async ($: EngineInterface, key: string, patch: Partial<Assumption
   const at = await stamp($)
   if ((await read($, kidsAtom)).some(k => uid(k) === key)) {
     // A subsession's item: the answer is saved in its own list.
-    await setKids($, [key], a => ({ ...a, ...patch, isSent: false, at }))
+    await setKids($, [key], a => ({ ...a, ...patch, isSent: false }))
   } else {
     await setItems($, list => list.map(a => (uid(a) === key ? { ...a, ...patch, isSent: false, at } : a)))
   }
@@ -723,6 +788,14 @@ const withoutAsk = (a: Assumption): Assumption => {
   return rest
 }
 
+// Subsession answers about to be sent from here although handed to the
+// subsession (it has gone, or did not send them in time): the ask is taken back
+// first, so the subsession does not send them too if it comes back.
+const takeBackAsks = async ($: EngineInterface, list: Assumption[]): Promise<void> => {
+  const late = list.filter(a => isKid(a) && a.sendAsked !== undefined).map(uid)
+  if (late.length > 0) await setKids($, late, withoutAsk)
+}
+
 // The answers this session sends: not another live session's (they go to that Claude).
 const sendable = async ($: EngineInterface, list: Assumption[]): Promise<Assumption[]> => {
   const now = await nowMs($)
@@ -735,7 +808,8 @@ const sendable = async ($: EngineInterface, list: Assumption[]): Promise<Assumpt
 // subsession, so it never reads as this session's item with the same number.
 const reviewLine = (a: Assumption): string => {
   const fix = norm(a.correction ?? '')
-  const id = isKid(a) ? `${a.from ?? folderName(a.home)} ${a.id}` : a.id
+  // In brackets: a subsession named like an id ("A1") never reads as one.
+  const id = isKid(a) ? `[${a.from ?? folderName(a.home)}] ${a.id}` : a.id
   if (a.verdict === 'right' && fix === '') return `- ${id} RIGHT`
   if (fix !== '') return `- ${id} ${a.verdict === 'right' ? 'RIGHT, but change' : 'CHANGE'}: ${a.text} -> ${fix}`
   return `- ${id} WRONG: ${a.text} (do not keep this; ask me if the right choice is not clear)`
@@ -799,7 +873,7 @@ const sendNow = async ($: EngineInterface, only?: string[]): Promise<void> => {
     const at = await stamp($)
     const keys = toKids.map(uid)
     for (const id of keys) answeredHere.add(id)
-    await setKids($, keys, a => ({ ...a, sendAsked: at, at }))
+    await setKids($, keys, a => ({ ...a, sendAsked: at }))
     const names = [...new Set(toKids.map(k => k.from ?? folderName(k.home)))].join(', ')
     try {
       $.ui.toast(`${toKids.length === 1 ? 'That answer goes' : `Those ${toKids.length} answers go`} to ${names}, the subsession that logged ${toKids.length === 1 ? 'it' : 'them'}.`)
@@ -828,11 +902,7 @@ const sendNow = async ($: EngineInterface, only?: string[]): Promise<void> => {
   const ids = list.map(uid)
   // A subsession's answer sent from here: its ask is taken back first, so the
   // subsession does not send it too if it comes back.
-  const lateKids = list.filter(a => isKid(a) && a.sendAsked !== undefined).map(uid)
-  if (lateKids.length > 0) {
-    const at = await stamp($)
-    await setKids($, lateKids, a => ({ ...withoutAsk(a), at }))
-  }
+  await takeBackAsks($, list)
   // Asked from another pane: the ask is answered now, so a failed send is not retried in a loop.
   if (list.some(a => !isKid(a) && a.sendAsked !== undefined)) {
     const at = await stamp($)
@@ -954,7 +1024,12 @@ async function drawSection<E extends ResolveInput>($: EngineInterface, e: E, loo
   const k = (name: string): string => (isStacked ? `as-${name}` : name)
   const held = await read($, items)
   // This folder's list, then the items of the subsessions this session started.
-  const list = [...(saved !== undefined && held.length === 0 ? saved : held), ...(await read($, kidsAtom))]
+  const kids = await read($, kidsAtom)
+  const own = saved !== undefined && held.length === 0 ? saved : held
+  // In the order they were logged, so in the stack's row budget a subsession's
+  // rows take their turn with this session's own.
+  const when = (a: Assumption): number => a.createdAt ?? a.at ?? 0
+  const list = kids.length === 0 ? own : [...own, ...kids].sort((a, b) => when(a) - when(b))
   const editId = await read($, editing)
   const open = list.filter(a => a.verdict === 'open').length
   const expanded = (await read($, isExpanded)) ?? list.length > 0
@@ -1053,7 +1128,7 @@ async function drawSection<E extends ResolveInput>($: EngineInterface, e: E, loo
           const at = await stamp($)
           await setItems($, l => l.map(a => (a.verdict === 'open' && seen.includes(uid(a)) ? { ...a, verdict: 'right' as const, isSent: false, at } : a)))
           const kidKeys = shown.filter(a => isKid(a) && a.verdict === 'open').map(uid)
-          await setKids($, kidKeys, a => ({ ...a, verdict: 'right' as const, isSent: false, at }))
+          await setKids($, kidKeys, a => ({ ...a, verdict: 'right' as const, isSent: false }))
           await openPane($)
         }}>{hidden > 0 ? 'All shown are right' : 'All open are right'}</Button>
         {/* Asked: Cancel takes the place "Clear all" had, so a double press cancels. */}
@@ -1116,7 +1191,7 @@ export const register: Register = (on, options) => {
     await update($, storeKey, () => key)
     // Loading is a merge with what is saved.
     await saveItems($)
-    await pullKids($).catch(() => undefined)
+    await pullKids($, true).catch(() => undefined)
     await $.tool.register({
       name: 'log_assumption',
       description:
@@ -1252,6 +1327,7 @@ export const register: Register = (on, options) => {
     const list = (await sendable($, [...(await read($, items)), ...(await read($, kidsAtom))])).filter(a => !waitingIds.includes(uid(a)))
     if (list.length === 0) return pass(e)
     const ids = list.map(uid)
+    await takeBackAsks($, list)
     await update($, queued, q => [...q, ...ids])
     try {
       const result = await pass({ ...e, context: [...(e.context ?? []), reviewText(list)] })

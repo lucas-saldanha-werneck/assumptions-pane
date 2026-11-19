@@ -214,6 +214,9 @@ type World = {
   host: { present: boolean; command: boolean }
   clock: ReturnType<typeof mock.clock>
   session: { id: string }
+  envSets: string[]
+  /** The next N writes of a key fail as if another session held the lock. */
+  failSetFor: Record<string, number>
 }
 
 /** The world beneath the plugin, with a store the test can read (mock.store
@@ -256,6 +259,8 @@ async function boot(
     host: { present: options.host ?? false, command: options.hostCommand ?? options.host ?? false },
     clock: mock.clock(on, { now: 1_000_000 }),
     session: { id: 's1' },
+    envSets: [],
+    failSetFor: {},
   }
   on('session.id', () => ({ value: world.session.id }) as never)
   on('session.cwd', () => ({ value: '/tmp' }) as never)
@@ -277,6 +282,11 @@ async function boot(
     const name = (e as { name: string }).name
     return { value: name === 'CLAUDE_PID' ? undefined : options.env?.[name] } as never
   })
+  on('env.set', (_$, e) => {
+    const a = e as { name: string; value?: string }
+    world.envSets.push(`${a.name}=${a.value ?? ''}`)
+    return { value: {} } as never
+  })
   on('process.hookEnv', () => ({ value: options.env?.CLAUDE_PID !== undefined ? { CLAUDE_PID: options.env.CLAUDE_PID } : {} }) as never)
   let lockedFor = options.storeLockedFor ?? 0
   on('store.set', (_$, e) => {
@@ -286,6 +296,10 @@ async function boot(
       throw new Error('$.store.set failed: Lock file is already being held')
     }
     const one = e as { key: string; value: unknown }
+    if ((world.failSetFor[one.key] ?? 0) > 0) {
+      world.failSetFor[one.key]--
+      throw new Error('$.store.set failed: Lock file is already being held')
+    }
     world.kept[one.key] = JSON.parse(JSON.stringify(one.value))
     world.sets.push({ key: one.key, value: world.kept[one.key] })
     return { value: undefined } as never
@@ -1329,7 +1343,7 @@ test('SB6 a subsession that has gone: its item still shows, and Send here delive
   expect(await ui.find({ type: 'Text', text: /A1 Use the 2025 price table/ })).toBeDefined()
   expect((await ui.find({ key: 'send' }))?.text).toBe('Send 1 to Claude')
   await ui.press({ key: 'send' })
-  expect(world.sent.join('\n')).toContain('jbei-mudar-valor A1 WRONG: Use the 2025 price table')
+  expect(world.sent.join('\n')).toContain('- [jbei-mudar-valor] A1 WRONG: Use the 2025 price table')
   const theirs = world.kept[kidKey] as { items: unknown[]; removed: string[] }
   expect(theirs.items).toEqual([])
   expect(theirs.removed).toContain('A1@kid1')
@@ -1371,5 +1385,94 @@ test('SB9 "All open are right" in the main pane marks the subsession items it sh
   const ui = await ownPane($, 'terminal')
   await ui.press({ key: 'all-right' })
   expect((world.kept[kidKey] as { items: { verdict: string }[] }).items[0]?.verdict).toBe('right')
+  await ui.unmount()
+})
+
+test('SB10 an answer the subsession saved over from an older read is written again', async ($, on) => {
+  const world = await boot($, on, {
+    env: MAIN,
+    stored: { [kidKey]: { items: [kidItem('A1', 'Use the 2025 price table')], nextId: 2, owners: { kid1: 1_000_000 } } },
+  })
+  await world.clock.advance(WATCH)
+  await settle()
+  const ui = await ownPane($, 'terminal')
+  await ui.press({ key: 'wrong-A1-kid1' })
+  await ui.unmount()
+  // The subsession saves the list it read before the answer landed.
+  world.kept[kidKey] = { items: [kidItem('A1', 'Use the 2025 price table')], nextId: 2, owners: { kid1: 1_000_000 } }
+  await world.clock.advance(WATCH)
+  await settle()
+  expect((world.kept[kidKey] as { items: { verdict: string }[] }).items[0]?.verdict).toBe('wrong')
+  const again = await ownPane($, 'terminal')
+  expect((await again.find({ key: 'send' }))?.text).toBe('Send 1 to Claude')
+  await again.unmount()
+})
+
+test('SB11 an answer that could not be saved in the subsession list (lock held) is saved on a later pull', async ($, on) => {
+  const world = await boot($, on, {
+    env: MAIN,
+    stored: { [kidKey]: { items: [kidItem('A1', 'Use the 2025 price table')], nextId: 2, owners: { kid1: 1_000_000 } } },
+  })
+  await world.clock.advance(WATCH)
+  await settle()
+  const ui = await ownPane($, 'terminal')
+  // The next write of the subsession's key fails.
+  world.failSetFor[kidKey] = 1
+  await ui.press({ key: 'wrong-A1-kid1' })
+  expect((world.kept[kidKey] as { items: { verdict: string }[] }).items[0]?.verdict).toBe('open')
+  await world.clock.advance(WATCH)
+  await settle()
+  expect((world.kept[kidKey] as { items: { verdict: string }[] }).items[0]?.verdict).toBe('wrong')
+  await ui.unmount()
+})
+
+test('SB12 a subsession takes its two variables out of the environment and keeps them across a reload', async ($, on) => {
+  const world = await boot($, on, { cwd: '/work/jbei', env: { CLAUDE_PID: '82281', CLAUDE_SUB_PARENT: '15790', CLAUDE_SUB_NAME: 'jbei-mudar-valor' } })
+  expect(world.envSets).toEqual(['CLAUDE_SUB_PARENT=', 'CLAUDE_SUB_NAME='])
+})
+
+test('SB13 after a reload, with the variables gone from the environment, a subsession still marks its items', async ($, on) => {
+  const world = await boot($, on, {
+    cwd: '/work/jbei',
+    env: { CLAUDE_PID: '82281' },
+    state: { owner: 'kid1', storeKey: kidKey, sub: { parent: '15790', name: 'jbei-mudar-valor' } },
+  })
+  await logAssumption($, 'After the reload')
+  const saved = world.kept[kidKey] as { items: { parent?: string; from?: string }[] }
+  expect(saved.items[0]?.parent).toBe('15790')
+  expect(saved.items[0]?.from).toBe('jbei-mudar-valor')
+})
+
+test('SB14 a typed prompt that sends a late subsession answer from here takes back its ask first', async ($, on) => {
+  const world = await boot($, on, {
+    env: MAIN,
+    // Handed to the subsession 20 s ago; it beats but never sent it.
+    stored: { [kidKey]: { items: [kidItem('A1', 'Use the 2025 price table', 'wrong', { sendAsked: 980_000, at: 980_000 })], nextId: 2, owners: { kid1: 1_000_000 } } },
+  })
+  await world.clock.advance(WATCH)
+  await settle()
+  await $.prompt.submit(TYPED)
+  expect(world.contexts.at(-1)?.join('\n')).toContain('- [jbei-mudar-valor] A1 WRONG: Use the 2025 price table')
+  const theirs = world.kept[kidKey] as { items: { sendAsked?: number }[]; removed: string[] }
+  expect(theirs.items).toEqual([])
+  expect(theirs.removed).toContain('A1@kid1')
+  expect(world.sets.some(x => x.key === kidKey && (x.value as { items: { sendAsked?: number }[] }).items.some(a => a.sendAsked === undefined))).toBe(true)
+})
+
+test('SB15 in the stack, subsession rows take their turn with the own rows, in the order logged', async ($, on) => {
+  const own = Array.from({ length: 6 }, (_, i) => one(`A${i + 1}`, `Own ${i + 1}`, 'open', { at: 1_000_200 + i, createdAt: 1_000_200 + i }))
+  sectionBeneath(on)
+  const world = await boot($, on, {
+    env: MAIN,
+    host: true,
+    stored: {
+      'assumptions:/tmp': { items: own, nextId: 7 },
+      [kidKey]: { items: [kidItem('A1', 'Kid first', 'open', { at: 1_000_100, createdAt: 1_000_100 })], nextId: 2, owners: { kid1: 1_000_000 } },
+    },
+  })
+  await world.clock.advance(WATCH)
+  await settle()
+  const ui = await $.ui.mount({ surface: 'terminal', ...STACK })
+  expect(await ui.find({ type: 'Text', text: /A1 Kid first/ })).toBeDefined()
   await ui.unmount()
 })

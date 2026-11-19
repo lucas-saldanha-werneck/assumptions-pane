@@ -111,7 +111,7 @@ also loads in the desktop app's local Code sessions.
   and Send hands it straight to the subsession, which sends it to its own Claude (the row says
   `jbei-mudar-valor · waiting for its session` meanwhile, and a toast says when it went). Once the
   subsession has been gone for 3 minutes, or has not sent a handed-over answer after 15 seconds,
-  Send here sends it to this Claude, named with the subsession (`- jbei-mudar-valor A3 WRONG: …`).
+  Send here sends it to this Claude, named with the subsession (`- [jbei-mudar-valor] A3 WRONG: …`).
   "All open are right" and "Clear all" here act on the subsession's rows too. The subsession's own
   pane keeps working as before. This works through two variables `claude-sub` gives the
   subsession: `CLAUDE_SUB_PARENT` (the pid of the session that started it) and `CLAUDE_SUB_NAME`.
