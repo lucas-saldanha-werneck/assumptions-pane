@@ -258,7 +258,7 @@ From a shell, the same commands work with `claude plugin` in place of `/plugin`.
 
 ## Limits
 
-- Built and tested on Claude Code 2.1.319. It needs a version with mods (hooks modules).
+- Built and tested on Claude Code 2.1.319; 0.6.0 (subsession items) needs 2.1.327 or later (`$.process.hookEnv`). It needs a version with mods (hooks modules).
 - The tests draw the pane on the `terminal` and `desktop` surfaces. Nobody has tried it by hand in the
   desktop app.
 - The side-stack mode is tested with a stand-in for side-stack in the tests, not with the released
