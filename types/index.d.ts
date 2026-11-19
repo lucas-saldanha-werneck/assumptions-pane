@@ -28,7 +28,7 @@ declare module 'claude-code' {
     // stacked: true while this plugin draws inside side-stack's pane (side-stack reads it).
     'assumptions-pane': {
       items: Assumption[]
-      isExpanded: boolean
+      isExpanded: boolean | null
       editing: string | null
       nextId: number
       queued: string[]

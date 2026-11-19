@@ -2,6 +2,11 @@
 
 Versions are the `version` in `.claude-plugin/plugin.json`. Newest first.
 
+## 0.5.1 (2026-11-19)
+
+- The list shows open whenever it has items; a new assumption opens it again after a Hide.
+- A save that fails (for example "Lock file is already being held" while another session in the same folder writes) is tried again up to 5 times before the warning shows.
+
 ## 0.5.0 (2026-11-18)
 
 - On the phone (Remote Control): open assumptions go to Claude to list at the end of its reply, once each; a reply of `ok`, `A46 errado: …` or `A46 certo` marks them in the same list.

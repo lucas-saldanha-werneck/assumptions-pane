@@ -13,7 +13,8 @@ import type { Look, StackHook } from './stack-guest'
 
 const PANE = 'assumptions'
 const items = atom({ plugin: 'assumptions-pane', key: 'items' } as const, [])
-const isExpanded = atom({ plugin: 'assumptions-pane', key: 'isExpanded' } as const, false)
+// null = not chosen yet: open while the list has anything. Hide/Show sets it; a new assumption opens it.
+const isExpanded = atom({ plugin: 'assumptions-pane', key: 'isExpanded' } as const, null)
 const editing = atom({ plugin: 'assumptions-pane', key: 'editing' } as const, null)
 // Numbers keep counting after a clear and after a reload, so A3 in the chat always means one item.
 const nextId = atom({ plugin: 'assumptions-pane', key: 'nextId' } as const, 1)
@@ -89,6 +90,12 @@ let lastStamp = 0
 let timeFormat: TimeFormat = 'YYYY-MM-DD HH:MM'
 let saving: Promise<void> = Promise.resolve()
 let saveFailed = false
+// A failed save is tried again a few times, later each time, before the
+// person is told: another session in the same folder can hold the store's
+// lock for a moment ("Lock file is already being held").
+const LOCK_RETRIES = 5
+const LOCK_RETRY_MS = 300
+let lockRetries = 0
 // One reload at a time.
 let ensuring: Promise<void> | null = null
 // The session watch: started once per process, it outlives a /clear.
@@ -287,8 +294,21 @@ function saveItems($: EngineInterface): Promise<boolean> {
       }
       owners = beats
       await $.store.set(key, { items: merged, nextId: next, clearedAt: cleared, removed: gone, owners: beats, floor })
+      lockRetries = 0
+      saveFailed = false
       return true
     } catch (err) {
+      if (lockRetries < LOCK_RETRIES) {
+        lockRetries++
+        try {
+          $.clock.after(LOCK_RETRY_MS * lockRetries, () => {
+            void saveItems($)
+          })
+          return false
+        } catch {
+          // No timer: say it below.
+        }
+      }
       // The list still holds for this session. Say so once, not on every change.
       if (!saveFailed) {
         saveFailed = true
@@ -649,9 +669,9 @@ async function drawSection<E extends ResolveInput>($: EngineInterface, e: E, loo
   const k = (name: string): string => (isStacked ? `as-${name}` : name)
   const held = await read($, items)
   const list = saved !== undefined && held.length === 0 ? saved : held
-  const expanded = await read($, isExpanded)
   const editId = await read($, editing)
   const open = list.filter(a => a.verdict === 'open').length
+  const expanded = (await read($, isExpanded)) ?? list.length > 0
   const queuedIds = await read($, queued)
   const confirm = (await read($, confirmClear)) > 0
   const sendNowList = await sendable($, list)
@@ -663,7 +683,7 @@ async function drawSection<E extends ResolveInput>($: EngineInterface, e: E, loo
   // Empty: the heading alone, nothing to show or hide.
   if (list.length === 0) return heading($, e, look, 'assumptions-pane', 'Assumptions', '0')
   const toggle = (
-    <Button key={k('toggle')} plain onPress={() => update($, isExpanded, v => !v)}>
+    <Button key={k('toggle')} plain onPress={() => update($, isExpanded, () => !expanded)}>
       {expanded ? 'Hide' : 'Show'}
     </Button>
   )
@@ -864,6 +884,8 @@ export const register: Register = (on, options) => {
     // Rows the cap pushed out stay out of the saved list too.
     await forget($, prevIds.filter(old => !after.some(a => uid(a) === old)))
     await saveItems($)
+    // Something new to look at: the list opens, even after a Hide.
+    await update($, isExpanded, () => true)
     await openPane($, false, `New assumption ${id}.`)
     if (isPhone) return { result: `Logged as ${id}. Keep working.\n${inTurnNote({ id, text })}` }
     return { result: `Logged as ${id}. Keep working; the person may correct it later.` }

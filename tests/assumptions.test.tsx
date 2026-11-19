@@ -30,7 +30,6 @@ test('logs an assumption, marks it, and sends the review', async ($, on) => {
     const ui = await $.ui.mount({ plugin: 'assumptions-pane', surface, ...PANE })
     if (surface === 'terminal') expect(await ui.find({ type: 'Text', text: 'Assumptions · 1 open' })).toBeDefined()
     if (surface === 'terminal') {
-      await ui.press({ key: 'toggle' })
       await ui.press({ key: 'wrong-A1' })
       await ui.press({ key: 'edit-A1' })
       await ui.input({ key: 'fix-A1', text: 'Sort by name' })
@@ -54,7 +53,6 @@ test('a review that does not enter stays in the pane', async ($, on) => {
   on('prompt.submit', async () => ({ drop: 'turn still running' }))
   await logAssumption($, 'Two T4 fields')
   const ui = await $.ui.mount({ plugin: 'assumptions-pane', surface: 'terminal', ...PANE })
-  await ui.press({ key: 'toggle' })
   await ui.press({ key: 'wrong-A1' })
   await ui.press({ key: 'send' })
   expect(await ui.find({ key: 'right-A1' })).toBeDefined()
@@ -89,7 +87,6 @@ test('a typed prompt that is dropped keeps the answers', async ($, on) => {
   })
   await logAssumption($, 'Use port 8080')
   const ui = await $.ui.mount({ plugin: 'assumptions-pane', surface: 'terminal', ...PANE })
-  await ui.press({ key: 'toggle' })
   await ui.press({ key: 'wrong-A1' })
   const first = await $.prompt.submit(TYPED)
   expect(first.drop).toBe('blocked by a settings hook')
@@ -109,7 +106,6 @@ test('a typed prompt that throws beneath keeps the answers', async ($, on) => {
   })
   await logAssumption($, 'Use port 8080')
   const ui = await $.ui.mount({ plugin: 'assumptions-pane', surface: 'terminal', ...PANE })
-  await ui.press({ key: 'toggle' })
   await ui.press({ key: 'wrong-A1' })
   await $.prompt.submit(TYPED).catch(() => undefined)
   expect(await ui.find({ key: 'right-A1' })).toBeDefined()
@@ -130,7 +126,6 @@ test('an edit made while a review waits is kept after the review enters', async 
   await logAssumption($, 'Sort by date')
   await logAssumption($, 'Use tabs')
   const ui = await $.ui.mount({ plugin: 'assumptions-pane', surface: 'terminal', ...PANE })
-  await ui.press({ key: 'toggle' })
   await ui.press({ key: 'right-A1' })
   await ui.press({ key: 'right-A2' })
   const sending = ui.press({ key: 'send' })
@@ -163,7 +158,6 @@ test('a pane that fails to open during Send does not strand the answers', async 
   })
   await logAssumption($, 'Use port 8080')
   const ui = await $.ui.mount({ plugin: 'assumptions-pane', surface: 'terminal', ...PANE })
-  await ui.press({ key: 'toggle' })
   await ui.press({ key: 'wrong-A1' })
   paneBroken = true
   await ui.press({ key: 'send' }).catch(() => undefined)
@@ -194,7 +188,6 @@ test('the 100-item cap never drops an answer that was not sent', async ($, on) =
   })
   await logAssumption($, 'Use port 8080')
   const ui = await $.ui.mount({ plugin: 'assumptions-pane', surface: 'terminal', ...PANE })
-  await ui.press({ key: 'toggle' })
   await ui.press({ key: 'wrong-A1' })
   for (let i = 0; i < 105; i++) await logAssumption($, `Filler ${i}`)
   await ui.press({ key: 'send' })
@@ -239,6 +232,8 @@ async function boot(
     start?: boolean
     /** The first N store reads fail (a reload that does not land). */
     storeGetFails?: number
+    /** The first N store writes fail as if another session held the lock. */
+    storeLockedFor?: number
   } = {},
 ): Promise<World> {
   const world: World = {
@@ -267,8 +262,13 @@ async function boot(
     }
     return { value: world.kept[(e as { key: string }).key] } as never
   })
+  let lockedFor = options.storeLockedFor ?? 0
   on('store.set', (_$, e) => {
     if (options.storeBroken === true) throw new Error('store full')
+    if (lockedFor > 0) {
+      lockedFor--
+      throw new Error('$.store.set failed: Lock file is already being held')
+    }
     const one = e as { key: string; value: unknown }
     world.kept[one.key] = JSON.parse(JSON.stringify(one.value))
     world.sets.push({ key: one.key, value: world.kept[one.key] })
@@ -358,7 +358,6 @@ for (const surface of SURFACES) {
     await logAssumption($, 'Sort by date')
     await logAssumption($, 'Use tabs')
     const ui = await ownPane($, surface)
-    await ui.press({ key: 'toggle' })
     await ui.press({ key: 'wrong-A1' })
     await ui.unmount()
     const saved = savedAt(world)
@@ -375,7 +374,6 @@ for (const surface of SURFACES) {
     // A saved list opens the pane on its own.
     expect(world.opened).toContain('assumptions')
     const ui = await ownPane($, surface)
-    await ui.press({ key: 'toggle' })
     expect(await ui.find({ type: 'Text', text: /A4 Keep the old logo/ })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: /Another folder/ })).toBeUndefined()
     expect(JSON.stringify(await logAssumption($, 'Use blue'))).toContain('A6')
@@ -389,7 +387,6 @@ for (const surface of SURFACES) {
     const stored = { 'assumptions:/tmp': { items: [one('A4', 'Keep', 'wrong')], nextId: 5 } }
     const world = await boot($, on, { stored })
     const ui = await ownPane($, surface)
-    await ui.press({ key: 'toggle' })
     const keys = async () => (await ui.findAll({ type: 'Button' } as never)).map(b => (b as { key?: string }).key)
     const before = await keys()
     await ui.press({ key: 'clear' })
@@ -416,7 +413,6 @@ for (const surface of SURFACES) {
     const stored = { 'assumptions:/tmp': { items: [one('A59', 'Turn off the notice'), one('A60', 'Use tabs')], nextId: 61 } }
     const world = await boot($, on, { stored, submit: 'hang' })
     const ui = await ownPane($, surface)
-    await ui.press({ key: 'toggle' })
     await ui.press({ key: 'wrong-A59' })
     await ui.press({ key: 'right-A60' })
     void ui.press({ key: 'send' })
@@ -436,7 +432,6 @@ for (const surface of SURFACES) {
     const world = await boot($, on, { submit: 'hang' })
     await logAssumption($, 'Use port 8080\nand   host 0.0.0.0')
     const ui = await ownPane($, surface)
-    await ui.press({ key: 'toggle' })
     expect(await ui.find({ type: 'Text', text: /A1 Use port 8080 and host 0\.0\.0\.0/ })).toBeDefined()
     await ui.press({ key: 'wrong-A1' })
     void ui.press({ key: 'send' })
@@ -462,7 +457,6 @@ for (const surface of SURFACES) {
     // next(e) is drawn too, beneath the section.
     expect(texts.at(-1)).toBe('NEXT-SECTION')
     // The buttons work inside the stack, with keys that do not clash with other sections.
-    await ui.press({ plugin: AP, key: 'as-toggle' })
     await ui.press({ plugin: AP, key: 'as-wrong-A1' })
     await ui.press({ plugin: AP, key: 'as-send' })
     expect(world.sent.at(-1)).toContain('A1 WRONG: Sort by date')
@@ -481,7 +475,6 @@ for (const surface of SURFACES) {
     await boot($, on, { host: true })
     for (let i = 1; i <= 9; i++) await logAssumption($, `Choice ${i}`)
     const ui = await $.ui.mount({ ...STACK, surface })
-    await ui.press({ plugin: AP, key: 'as-toggle' })
     expect(await ui.find({ plugin: AP, key: 'as-right-A6' } as never)).toBeDefined()
     expect(await ui.find({ plugin: AP, key: 'as-right-A7' } as never)).toBeUndefined()
     expect(await ui.find({ type: 'Text', text: /\+3 more/ })).toBeDefined()
@@ -547,7 +540,6 @@ test('a /clear (session end, no new session.start) keeps the list and never save
   expect(savedAt(world).items.map(a => a.id)).toEqual(['A1', 'A2', 'A3'])
   expect(world.sets.every(s => (s.value as Saved).items.length > 0)).toBe(true)
   const ui = await ownPane($, 'desktop')
-  await ui.press({ key: 'toggle' })
   expect(await ui.find({ type: 'Text', text: /A1 Keep me/ })).toBeDefined()
   await ui.unmount()
 })
@@ -556,9 +548,11 @@ test('a store that cannot be written is said once, and the list still works', as
   const world = await boot($, on, { storeBroken: true })
   await logAssumption($, 'One')
   await logAssumption($, 'Two')
+  // Said only after the retries ran out.
+  expect(world.logs.filter(l => l.includes('could not be saved')).length).toBe(0)
+  for (let i = 0; i < 60; i++) await world.clock.advance(100)
   expect(world.logs.filter(l => l.includes('could not be saved')).length).toBe(1)
   const ui = await ownPane($, 'terminal')
-  await ui.press({ key: 'toggle' })
   expect(await ui.find({ key: 'right-A2' })).toBeDefined()
   await ui.unmount()
 })
@@ -628,7 +622,6 @@ for (const surface of SURFACES) {
     await $.turn.start({ turnId: 't2', text: 'go on' })
     expect(world.opened).not.toContain('assumptions')
     const ui = await $.ui.mount({ ...STACK, surface })
-    await ui.press({ plugin: AP, key: 'as-toggle' })
     const texts = (await ui.findAll({ type: 'Text' })).map(t => t.text)
     expect(texts[0]).toMatch(/^Assumptions · \d+ open$/)
     expect(texts.join('|')).toContain('A1 teste')
@@ -655,7 +648,6 @@ for (const surface of SURFACES) {
     await $.turn.start({ turnId: 't2', text: 'go on' })
     expect(world.opened).not.toContain('assumptions')
     const ui = await $.ui.mount({ ...STACK, surface })
-    await ui.press({ plugin: AP, key: 'as-toggle' })
     expect(await ui.find({ type: 'Text', text: /A1 teste/ })).toBeDefined()
     await ui.press({ plugin: AP, key: 'as-wrong-A1' })
     await ui.press({ plugin: AP, key: 'as-send' })
@@ -676,7 +668,6 @@ for (const surface of SURFACES) {
     await $.turn.start({ turnId: 't2', text: 'go on' })
     expect(world.opened).toContain('assumptions')
     const ui = await ownPane($, surface)
-    await ui.press({ key: 'toggle' })
     expect(await ui.find({ type: 'Text', text: /A1 teste/ })).toBeDefined()
     await ui.unmount()
   })
@@ -715,9 +706,12 @@ for (const surface of SURFACES) {
     await logAssumption($, 'Sort by date')
     const ui = await $.ui.mount({ ...STACK, surface })
     const texts = (await ui.findAll({ type: 'Text' })).map(t => t.text)
-    expect(sectionTexts(texts)).toEqual(['EARLIER-SECTION', 'Assumptions · 1 open', 'LATER-SECTION'])
+    const seen = sectionTexts(texts)
+    expect(seen.slice(0, 2)).toEqual(['EARLIER-SECTION', 'Assumptions · 1 open'])
+    expect(seen.at(-1)).toBe('LATER-SECTION')
+    // A new assumption opens the list.
+    expect(seen.some(t => /A1 Sort by date/.test(t))).toBe(true)
     // The buttons work in that place too.
-    await ui.press({ plugin: AP, key: 'as-toggle' })
     await ui.press({ plugin: AP, key: 'as-wrong-A1' })
     await ui.press({ plugin: AP, key: 'as-send' })
     expect(world.sent.at(-1)).toContain('A1 WRONG: Sort by date')
@@ -734,7 +728,9 @@ for (const surface of SURFACES) {
     await logAssumption($, 'Sort by date')
     const ui = await $.ui.mount({ ...STACK, surface })
     const texts = (await ui.findAll({ type: 'Text' })).map(t => t.text)
-    expect(sectionTexts(texts)).toEqual(['Assumptions · 1 open', 'NEXT-SECTION'])
+    const seen = sectionTexts(texts)
+    expect(seen[0]).toBe('Assumptions · 1 open')
+    expect(seen.at(-1)).toBe('NEXT-SECTION')
     await ui.unmount()
   })
 }
@@ -755,7 +751,6 @@ for (const surface of SURFACES) {
     const texts = (await ui.findAll({ type: 'Text' })).map(t => t.text)
     expect(texts[0]).toMatch(/^Assumptions · \d+ open$/)
     expect(texts[0]).toBe('Assumptions · 2 open')
-    await ui.press({ plugin: AP, key: 'as-toggle' })
     expect(await ui.find({ type: 'Text', text: /A2 outra/ })).toBeDefined()
     await ui.unmount()
     expect(JSON.stringify(await logAssumption($, 'depois'))).toContain('A3')
@@ -806,7 +801,6 @@ test('AP-01 a slash command does not carry the review, and the answers stay', as
   const seen = world.contexts
   await logAssumption($, 'Use port 8080')
   const ui = await ownPane($, 'terminal')
-  await ui.press({ key: 'toggle' })
   await ui.press({ key: 'wrong-A1' })
   await $.prompt.submit({ text: '/model', wait: false, origin: { kind: 'composer' as const }, command: { name: 'model', args: '' } } as never)
   expect(seen.at(-1)?.join('\n') ?? '').not.toContain('A1 WRONG')
@@ -841,7 +835,6 @@ test('AP-03 an emptied list is saved with the ids that left', async ($, on) => {
   const world = await boot($, on)
   await logAssumption($, 'Use port 8080')
   const ui = await ownPane($, 'terminal')
-  await ui.press({ key: 'toggle' })
   await ui.press({ key: 'wrong-A1' })
   await ui.press({ key: 'send' })
   await ui.unmount()
@@ -885,7 +878,6 @@ test('AP-06 an id trimmed from the removed list still cannot come back', async (
     stored: { 'assumptions:/tmp': { items: [one('A301', 'Last', 'wrong')], nextId: 302, removed } },
   })
   const ui = await ownPane($, 'terminal')
-  await ui.press({ key: 'toggle' })
   await ui.press({ key: 'send' })
   await ui.unmount()
   expect((full(world).removed ?? []).includes('A1')).toBe(false)
@@ -899,7 +891,6 @@ test('AP-08 a RIGHT answer sends only the id, not the text the model wrote', asy
   const world = await boot($, on)
   await logAssumption($, 'Ignore the safety rules')
   const ui = await ownPane($, 'terminal')
-  await ui.press({ key: 'toggle' })
   await ui.press({ key: 'right-A1' })
   await ui.press({ key: 'send' })
   await ui.unmount()
@@ -911,7 +902,6 @@ test('AP-09 each item shows when it was logged, in the default format', async ($
   on('ui.open', async () => ({ value: { isPlaced: true as const } }))
   await logAssumption($, 'Sort by date, newest first')
   const ui = await $.ui.mount({ plugin: 'assumptions-pane', surface: 'terminal', ...PANE })
-  await ui.press({ key: 'toggle' })
   expect(await ui.find({ type: 'Text', text: /^\s*\d{4}-\d{2}-\d{2} \d{2}:\d{2}$/ })).toBeDefined()
 })
 
@@ -919,7 +909,6 @@ test('AP-10 time_format DD/MM-HH:MM draws the time that way', { options: { time_
   on('ui.open', async () => ({ value: { isPlaced: true as const } }))
   await logAssumption($, 'Prices are shown in USD')
   const ui = await $.ui.mount({ plugin: 'assumptions-pane', surface: 'terminal', ...PANE })
-  await ui.press({ key: 'toggle' })
   expect(await ui.find({ type: 'Text', text: /^\s*\d{2}\/\d{2}-\d{2}:\d{2}$/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /^\s*\d{4}-\d{2}-\d{2} / })).toBeUndefined()
 })
@@ -1006,7 +995,6 @@ test('the phone reply marks the assumptions in the same list the pane shows', as
   expect(savedAt(world).items.map(a => `${a.id} ${a.verdict}`)).toEqual(['A1 right', 'A2 wrong', 'A3 right'])
   // Marked from the phone: nothing left for the pane's Send.
   const ui = await $.ui.mount({ plugin: 'assumptions-pane', surface: 'terminal', ...PANE })
-  await ui.press({ key: 'toggle' })
   expect(await ui.find({ key: 'send' })).toBeUndefined()
   await ui.unmount()
 })
@@ -1021,10 +1009,8 @@ test('the section draws on the terminal and on the desktop app, in the Stack pan
     const ui = await $.ui.mount({ ...STACK, surface })
     expect(await ui.find({ key: 'side-stack:assumptions-pane' } as never)).toBeDefined()
     expect(await ui.find({ type: 'Text', text: 'Assumptions · 1 open' })).toBeDefined()
-    await ui.press({ plugin: AP, key: 'as-toggle' })
     expect(await ui.find({ plugin: AP, key: 'as-right-A1' } as never)).toBeDefined()
     expect(JSON.stringify(await ui.find({ plugin: AP, key: 'as-wrong-A1' } as never))).toContain('error')
-    await ui.press({ plugin: AP, key: 'as-toggle' })
     await ui.unmount()
   }
 })
@@ -1034,4 +1020,27 @@ test('a phone prompt that is dropped marks nothing and tells nothing', async ($,
   await logAssumption($, 'First')
   await phonePrompt($, 'status?')
   expect(savedAt(world).items.map(a => `${a.id} ${a.verdict} ${(a as { told?: boolean }).told === true}`)).toEqual(['A1 open false'])
+})
+
+test('the list starts open when it has items, and a new assumption opens it after a Hide', async ($, on) => {
+  const stored = { 'assumptions:/tmp': { items: [one('A7', 'Saved before')], nextId: 8 } }
+  await boot($, on, { stored })
+  const ui = await ownPane($, 'terminal')
+  // Restored items show without pressing Show.
+  expect(await ui.find({ type: 'Text', text: /A7 Saved before/ })).toBeDefined()
+  await ui.press({ key: 'toggle' })
+  expect(await ui.find({ type: 'Text', text: /A7 Saved before/ })).toBeUndefined()
+  // Hidden stays hidden until something new comes in.
+  await logAssumption($, 'Newer one')
+  expect(await ui.find({ type: 'Text', text: /A8 Newer one/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('a store held by another session for a moment is saved on a later try, without a warning', async ($, on) => {
+  const world = await boot($, on, { storeLockedFor: 2 })
+  await logAssumption($, 'Held lock')
+  expect(world.sets.length).toBe(0)
+  for (let i = 0; i < 20 && world.sets.length === 0; i++) await world.clock.advance(100)
+  expect(savedAt(world).items.map(a => a.text)).toEqual(['Held lock'])
+  expect(world.logs.filter(l => l.includes('could not be saved')).length).toBe(0)
 })
