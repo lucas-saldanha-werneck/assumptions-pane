@@ -211,6 +211,11 @@ in the chat, the way [side-notes](https://github.com/lucas-saldanha-werneck/side
 - The marks go into the same saved list, so the pane on the computer shows them (dim, as sent:
   Claude read your reply, so Send does not send them again). Claude gets them as a review in that
   prompt and applies each wrong one.
+- Subsessions started by `claude-sub` (0.2.2+): the session that started them lists their open
+  assumptions too, each with the subsession's name (`jbei-extras A3 – …`; its own stay `A3`).
+  Answer with the name: `jbei-extras A3 errado: <why>`. The answer is saved in the subsession's
+  list and handed to it, as Send does in the pane; a subsession that has gone (3 minutes without
+  a heartbeat) gets it through this session's Claude, named `[jbei-extras] A3`.
 
 ## Terminal and desktop app
 

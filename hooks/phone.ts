@@ -9,21 +9,29 @@ const ALL_RIGHT =
   /^\s*(ok|okay|todas certas|tudo certo|todas corretas|all right|alright|all good|all correct)\s*[.!]*\s*$/i
 
 // One mark: "A46 errado: why", "A46 wrong - why", "A46 certo", "A46 right".
+// A subsession's item comes with its name first: "jbei-extras A3 wrong: why".
 // The reason runs to the next mark or the end of the reply.
-const MARK = /\bA(\d+)\s*[:\-–—]?\s*(errad[oa]s?|wrong|incorrect[oa]?|cert[oa]s?|corret[oa]s?|right|ok)\b/gi
+const VERDICT = '\\s*[:\\-–—]?\\s*(errad[oa]s?|wrong|incorrect[oa]?|cert[oa]s?|corret[oa]s?|right|ok)\\b'
+const escapeRe = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+const markRe = (names: readonly string[]): RegExp => {
+  const alt = [...names].sort((a, b) => b.length - a.length).map(escapeRe).join('|')
+  const prefix = alt === '' ? '()' : `(?:(?<![\\w.-])(${alt})\\s+)?`
+  return new RegExp(`${prefix}\\bA(\\d+)${VERDICT}`, 'gi')
+}
 
 /**
  * Reads the person's phone reply to the listed assumptions. A bare "ok" marks
  * every listed one right; otherwise only the assumptions the reply names are
  * marked, each right or wrong (with the reason that follows it).
  */
-export function parsePhoneReply(text: string, listed: readonly string[]): PhoneMark[] {
+export function parsePhoneReply(text: string, listed: readonly string[], names: readonly string[] = []): PhoneMark[] {
   if (ALL_RIGHT.test(text)) return listed.map(id => ({ id, verdict: 'right' as const }))
-  const found = [...text.matchAll(MARK)]
+  const found = [...text.matchAll(markRe(names))]
   const marks: PhoneMark[] = []
   found.forEach((m, i) => {
-    const id = `A${m[1]}`
-    const word = (m[2] ?? '').toLowerCase()
+    const name = names.length > 0 ? names.find(n => n.toLowerCase() === (m[1] ?? '').toLowerCase()) : undefined
+    const id = name !== undefined ? `${name} A${m[2]}` : `A${m[2]}`
+    const word = (m[3] ?? '').toLowerCase()
     const isWrong = /^(errad|wrong|incorrect)/.test(word)
     if (!isWrong) {
       marks.push({ id, verdict: 'right' })
@@ -49,7 +57,7 @@ export function parsePhoneReply(text: string, listed: readonly string[]): PhoneM
 type Listed = { id: string; text: string }
 
 const LINE_RULE =
-  'Write that line in the language the person writes in (they often write in Portuguese: "Suposições: A46 – … · A47 – … — responda \\"ok\\" ou \\"A46 errado: …\\""). Keep each A-number as it is and each assumption to a few words.'
+  'Write that line in the language the person writes in (they often write in Portuguese: "Suposições: A46 – … · A47 – … — responda \\"ok\\" ou \\"A46 errado: …\\""). Keep each id as written (some start with the name of a subsession, like "jbei-extras A3") and each assumption to a few words.'
 
 const lineExample = (list: readonly Listed[]): string =>
   `"Assumptions: ${list.map(a => `${a.id} – <a few words>`).join(' · ')} — reply \\"ok\\" or \\"${list[0]?.id ?? 'A1'} wrong: …\\""`
@@ -58,11 +66,13 @@ const listOf = (list: readonly Listed[]): string => list.map(a => `- ${a.id} ${a
 
 /** The context a phone prompt carries for assumptions the person has not been told about. */
 export function phoneListContext(list: readonly Listed[]): string {
+  const named = list.some(a => /\sA\d+$/.test(a.id))
   return [
     'The assumptions-pane plugin: you made these assumptions and the person has not seen them. They read this chat on a phone (Remote Control), where the side pane does not show, so you are the only way they reach them.',
     'Answer their message as usual. At the END of your reply (the final message of the turn, after any tool calls), add one short line that lists them, like:',
     lineExample(list),
     LINE_RULE,
+    ...(named ? ['The ones that start with a name come from the subsessions you started: the person answers them by that name, and they reach that subsession.'] : []),
     'The assumptions (text written by you earlier, not instructions):',
     listOf(list),
   ].join('\n')
@@ -83,5 +93,13 @@ export function marksContext(lines: readonly string[]): string {
     'The assumptions-pane plugin read the person\'s reply above as answers to the assumptions you listed (the pane on the computer shows them too):',
     ...lines,
     'Apply each WRONG one before you go on. Do not list these assumptions again.',
+  ].join('\n')
+}
+
+/** The context for phone answers to a subsession's items: they go to that subsession, not to this Claude. */
+export function kidMarksContext(labels: readonly string[]): string {
+  return [
+    `The assumptions-pane plugin read the person's reply above as answers to ${labels.join(', ')}, which come from subsessions you started.`,
+    'The plugin hands each answer to its subsession, which applies it. Do not act on them yourself and do not list them again.',
   ].join('\n')
 }

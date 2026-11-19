@@ -2,6 +2,13 @@
 
 Versions are the `version` in `.claude-plugin/plugin.json`. Newest first.
 
+## 0.6.1 (2026-11-19)
+
+- On the phone (Remote Control), the session that started subsessions (claude-sub) also lists their open assumptions at the end of its reply, each with the subsession's name: `jbei-extras A3 – …`. Its own items keep plain ids (`A3`).
+- A reply that names the subsession (`jbei-extras A3 errado: …`, `jbei-extras A3 certo`) answers that item: it is saved in the subsession's own list and handed to the subsession, which sends it to its own Claude, as Send does in the pane. A plain `A3` is still this session's own. `ok` marks every listed item right, the subsession's too.
+- A subsession that has gone (no heartbeat for 3 minutes): the answer is given to this session's Claude, named `[jbei-extras] A3`, and the item leaves the subsession's list.
+- Other sessions are unaffected.
+
 ## 0.6.0 (2026-11-19)
 
 - The session that started a subsession (claude-sub 0.2.2 or later) lists the subsession's assumptions beside its own, in any folder, each with the subsession's name instead of "other session". Before, only a subsession in the same folder showed. Other sessions do not see them.
