@@ -2,7 +2,7 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, ResolveInput } from 'claude-code'
 
 import type { Assumption, Kid } from '../types'
-import { inTurnNote, marksContext, parsePhoneReply, phoneListContext } from './phone'
+import { inTurnNote, kidMarksContext, marksContext, parsePhoneReply, phoneListContext } from './phone'
 import { HOST_CHECKS_MS, STACKED_LINE, hasSection, heading, hostPresent, lookOf, notePrompt, placeSection, promptFromPhone, showStack } from './stack-guest'
 import type { Look, StackHook } from './stack-guest'
 
@@ -941,43 +941,101 @@ const sendNow = async ($: EngineInterface, only?: string[]): Promise<void> => {
 // log_assumption call itself (inTurnNote). The marks land in the same store, so
 // the pane on the computer shows them; they count as sent (Claude read the reply).
 
-type PhonePlan = { contexts: string[]; marked: Map<string, Assumption>; told: string[] }
+type PhonePlan = {
+  contexts: string[]
+  marked: Map<string, Assumption>
+  told: string[]
+  // A subsession's items: marked (answer, and whether it is handed to the live subsession) and told.
+  kidMarked: Map<string, { item: Assumption; live: boolean }>
+  kidTold: string[]
+}
+
+// How the person names an item on the phone: "A3" for this session's own, "<subsession> A3" for a subsession's.
+const kidName = (k: Kid): string => k.from ?? folderName(k.home)
+const kidLabel = (k: Kid): string => `${kidName(k)} ${k.id}`
 
 // Reads the reply and picks what to tell; writes nothing (commitPhone does, once the prompt passed).
 async function planPhonePrompt($: EngineInterface, text: string): Promise<PhonePlan> {
   const contexts: string[] = []
   const now = await nowMs($)
+  // The subsessions' lists as they are now, not as of the last watch tick.
+  await pullKids($, true).catch(() => undefined)
   const list = await read($, items)
-  const listedIds = list.filter(a => phoneListed.includes(uid(a)) && a.verdict === 'open').map(a => a.id)
-  const marks = parsePhoneReply(text, listedIds)
+  const kids = await read($, kidsAtom)
+  const isListed = (u: string): boolean => phoneListed.includes(u)
+  const own = list.filter(a => isListed(uid(a)) && a.verdict === 'open')
+  const listedKids = kids.filter(k => isListed(uid(k)) && k.verdict === 'open')
+  const marks = parsePhoneReply(
+    text,
+    [...own.map(a => a.id), ...listedKids.map(kidLabel)],
+    [...new Set(kids.map(kidName))],
+  )
   const marked = new Map<string, Assumption>()
+  const kidMarked = new Map<string, { item: Assumption; live: boolean }>()
   if (marks.length > 0) {
     const at = await stamp($)
     for (const m of marks) {
+      const patch = { verdict: m.verdict, isSent: true, at, told: true, ...(m.why !== undefined ? { correction: m.why } : {}) }
+      const kid = kids.find(k => kidLabel(k) === m.id)
+      if (kid !== undefined) {
+        kidMarked.set(uid(kid), { item: { ...kid, ...patch }, live: kid.seen > now - ALIVE_MS })
+        continue
+      }
       const a = list.find(one => one.id === m.id && mine(one, now))
       if (a === undefined) continue
-      marked.set(uid(a), { ...a, verdict: m.verdict, isSent: true, at, told: true, ...(m.why !== undefined ? { correction: m.why } : {}) })
+      marked.set(uid(a), { ...a, ...patch })
     }
-    if (marked.size > 0) contexts.push(marksContext([...marked.values()].map(reviewLine)))
+    // A subsession that is alive gets its answers itself; one that has gone: this Claude applies them, named with the subsession.
+    const lines = [
+      ...[...marked.values()].map(reviewLine),
+      ...[...kidMarked.values()].filter(k => !k.live).map(k => reviewLine(k.item)),
+    ]
+    if (lines.length > 0) contexts.push(marksContext(lines))
+    const toKid = [...kidMarked.values()].filter(k => k.live)
+    if (toKid.length > 0) contexts.push(kidMarksContext(toKid.map(k => kidLabel(k.item as Kid))))
   }
   const untold = list.filter(a => a.verdict === 'open' && !a.isSent && a.told !== true && mine(a, now) && !marked.has(uid(a)))
-  if (untold.length > 0) contexts.push(phoneListContext(untold.map(a => ({ id: a.id, text: a.text }))))
-  return { contexts, marked, told: untold.map(uid) }
+  const untoldKids = kids.filter(k => k.verdict === 'open' && !k.isSent && k.told !== true && !kidMarked.has(uid(k)))
+  const toTell = [...untold.map(a => ({ id: a.id, text: a.text })), ...untoldKids.map(k => ({ id: kidLabel(k), text: k.text }))]
+  if (toTell.length > 0) contexts.push(phoneListContext(toTell))
+  return { contexts, marked, told: untold.map(uid), kidMarked, kidTold: untoldKids.map(uid) }
 }
 
 // The prompt got through: save the marks and the told flags, and what a later "ok" answers.
 async function commitPhone($: EngineInterface, plan: PhonePlan): Promise<void> {
-  if (plan.marked.size === 0 && plan.told.length === 0) return
-  await setItems($, l =>
-    l.map(a => {
-      const m = plan.marked.get(uid(a))
-      if (m !== undefined) return { ...a, verdict: m.verdict, isSent: true, at: m.at, told: true, ...(m.correction !== undefined ? { correction: m.correction } : {}) }
-      return plan.told.includes(uid(a)) ? { ...a, told: true } : a
-    }),
-  )
+  if (plan.marked.size === 0 && plan.told.length === 0 && plan.kidMarked.size === 0 && plan.kidTold.length === 0) return
+  if (plan.marked.size > 0 || plan.told.length > 0) {
+    await setItems($, l =>
+      l.map(a => {
+        const m = plan.marked.get(uid(a))
+        if (m !== undefined) return { ...a, verdict: m.verdict, isSent: true, at: m.at, told: true, ...(m.correction !== undefined ? { correction: m.correction } : {}) }
+        return plan.told.includes(uid(a)) ? { ...a, told: true } : a
+      }),
+    )
+  }
+  // A subsession's items are changed in its own list. A live one gets the answer
+  // handed over (its watch sends it to its own Claude, as Send in the pane does);
+  // one that has gone was told in this prompt, so its item leaves.
+  const handed = [...plan.kidMarked].filter(([, v]) => v.live).map(([k]) => k)
+  const sentHere = [...plan.kidMarked].filter(([, v]) => !v.live).map(([k]) => k)
+  if (plan.kidTold.length > 0) await setKids($, plan.kidTold, a => ({ ...a, told: true }))
+  if (handed.length > 0) {
+    const at = await stamp($)
+    for (const k of handed) answeredHere.add(k)
+    await setKids($, handed, a => {
+      const m = plan.kidMarked.get(uid(a))?.item
+      const { correction: _c, ...base } = a
+      return { ...base, verdict: m?.verdict ?? a.verdict, told: true, isSent: false, sendAsked: at, ...(m?.correction !== undefined ? { correction: m.correction } : {}) }
+    })
+  }
+  if (sentHere.length > 0) {
+    const gone = (await read($, kidsAtom)).filter(k => sentHere.includes(uid(k)))
+    await dropKids($, gone)
+  }
   // The ones listed and not answered yet stay for a later "ok".
-  phoneListed = [...phoneListed.filter(id => !plan.marked.has(id)), ...plan.told]
-  if (plan.marked.size > 0) await redraw($)
+  const answered = new Set([...plan.marked.keys(), ...plan.kidMarked.keys()])
+  phoneListed = [...phoneListed.filter(id => !answered.has(id)), ...plan.told, ...plan.kidTold]
+  if (answered.size > 0) await redraw($)
 }
 
 // The list keeps at most this many items. Answers not sent yet never count

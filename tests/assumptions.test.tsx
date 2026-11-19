@@ -1477,3 +1477,89 @@ test('SB15 in the stack, subsession rows take their turn with the own rows, in t
   expect(await ui.find({ type: 'Text', text: /A1 Kid first/ })).toBeDefined()
   await ui.unmount()
 })
+
+// ---- Phone: the subsessions' items beside the session's own ------------------
+
+describe('phone replies naming a subsession', () => {
+  const names = ['jbei-extras']
+  test('"<name> A3 wrong: why" marks the subsession item; a plain A3 stays the own one', () => {
+    expect(parsePhoneReply('jbei-extras A3 errado: use 2025. A3 certo', ['A3', 'jbei-extras A3'], names)).toEqual([
+      { id: 'jbei-extras A3', verdict: 'wrong', why: 'use 2025.' },
+      { id: 'A3', verdict: 'right' },
+    ])
+  })
+  test('the name is matched without case, and a word before a plain id is not a name', () => {
+    expect(parsePhoneReply('JBEI-extras A1 right', [], names)).toEqual([{ id: 'jbei-extras A1', verdict: 'right' }])
+    expect(parsePhoneReply('mas A1 wrong: no', [], names)).toEqual([{ id: 'A1', verdict: 'wrong', why: 'no' }])
+  })
+  test('a bare ok marks the listed subsession labels right too', () => {
+    expect(parsePhoneReply('ok', ['A1', 'jbei-extras A1'], names)).toEqual([
+      { id: 'A1', verdict: 'right' },
+      { id: 'jbei-extras A1', verdict: 'right' },
+    ])
+  })
+})
+
+const kidRow = (id: string, text: string, extra: object = {}) =>
+  one(id, text, 'open', { owner: 'kid1', parent: '15790', from: 'jbei-mudar-valor', at: 1_000_100, createdAt: 1_000_100, ...extra })
+
+const phoneWithKid = async ($: Engine, on: On, owners: Record<string, number> = { kid1: 1_000_000 }) => {
+  const world = await boot($, on, {
+    env: MAIN,
+    stored: { [kidKey]: { items: [kidRow('A3', 'Use the 2025 price table')], nextId: 4, owners } },
+  })
+  await logAssumption($, 'Own one')
+  return world
+}
+
+test('PK1 on the phone the subsession items are listed with its name, the own ones plain, each told once', async ($, on) => {
+  const world = await phoneWithKid($, on)
+  await phonePrompt($, 'status?')
+  const told = phoneContexts(world).join('\n')
+  expect(told).toContain('- A1 Own one')
+  expect(told).toContain('- jbei-mudar-valor A3 Use the 2025 price table')
+  await phonePrompt($, 'e agora?')
+  expect(phoneContexts(world)).toEqual([])
+  expect((world.kept[kidKey] as { items: { told?: boolean }[] }).items[0]?.told).toBe(true)
+})
+
+test('PK2 "<name> A3 errado: why" on the phone goes to the live subsession, not to this Claude', async ($, on) => {
+  const world = await phoneWithKid($, on)
+  await phonePrompt($, 'status?')
+  await phonePrompt($, 'jbei-mudar-valor A3 errado: use the 2026 table')
+  const theirs = (world.kept[kidKey] as { items: { verdict: string; correction?: string; sendAsked?: number }[] }).items[0]
+  expect(theirs?.verdict).toBe('wrong')
+  expect(theirs?.correction).toBe('use the 2026 table')
+  expect(typeof theirs?.sendAsked).toBe('number')
+  const ctx = phoneContexts(world).join('\n')
+  expect(ctx).toContain('jbei-mudar-valor A3')
+  expect(ctx).not.toContain('CHANGE')
+  // The session's own A1 is untouched.
+  expect(savedAt(world).items.map(a => `${a.id} ${a.verdict}`)).toEqual(['A1 open'])
+})
+
+test('PK3 a plain "A1 errado" on the phone still marks the own item, not the subsession one', async ($, on) => {
+  const world = await phoneWithKid($, on)
+  await phonePrompt($, 'status?')
+  await phonePrompt($, 'A1 errado: change it')
+  expect(savedAt(world).items.map(a => `${a.id} ${a.verdict}`)).toEqual(['A1 wrong'])
+  expect((world.kept[kidKey] as { items: { verdict: string }[] }).items[0]?.verdict).toBe('open')
+})
+
+test('PK4 a subsession that has gone: its phone answer is told to this Claude with the name, and the item leaves its list', async ($, on) => {
+  const world = await phoneWithKid($, on, { kid1: 100_000 })
+  await phonePrompt($, 'status?')
+  await phonePrompt($, 'jbei-mudar-valor A3 errado: use the 2026 table')
+  expect(phoneContexts(world).join('\n')).toContain('- [jbei-mudar-valor] A3 CHANGE: Use the 2025 price table -> use the 2026 table')
+  const theirs = world.kept[kidKey] as { items: unknown[]; removed: string[] }
+  expect(theirs.items).toEqual([])
+  expect(theirs.removed).toContain('A3@kid1')
+})
+
+test('PK5 "ok" on the phone marks the listed subsession items right in their own list', async ($, on) => {
+  const world = await phoneWithKid($, on)
+  await phonePrompt($, 'status?')
+  await phonePrompt($, 'ok')
+  expect((world.kept[kidKey] as { items: { verdict: string }[] }).items[0]?.verdict).toBe('right')
+  expect(savedAt(world).items.map(a => `${a.id} ${a.verdict}`)).toEqual(['A1 right'])
+})
