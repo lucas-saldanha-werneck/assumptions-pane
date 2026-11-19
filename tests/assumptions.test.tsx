@@ -296,8 +296,9 @@ async function boot(
       throw new Error('$.store.set failed: Lock file is already being held')
     }
     const one = e as { key: string; value: unknown }
-    if ((world.failSetFor[one.key] ?? 0) > 0) {
-      world.failSetFor[one.key]--
+    const fails = world.failSetFor[one.key] ?? 0
+    if (fails > 0) {
+      world.failSetFor[one.key] = fails - 1
       throw new Error('$.store.set failed: Lock file is already being held')
     }
     world.kept[one.key] = JSON.parse(JSON.stringify(one.value))
