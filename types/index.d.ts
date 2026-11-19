@@ -15,6 +15,8 @@ export type Assumption = {
   owner?: string
   // Told to the person on the phone (Remote Control), so it is not told again.
   told?: boolean
+  // Send was pressed for it in another session's pane (when): its owner sends it.
+  sendAsked?: number
 }
 
 declare module 'claude-code' {
@@ -40,6 +42,8 @@ declare module 'claude-code' {
       // The session id the list was loaded under (gone with the state on a /clear).
       loadedFor: string | null
       showStack: number
+      // This process's owner mark, kept across a reload of the module.
+      owner: string | null
     }
     'side-stack': { shownBy: Record<string, number> }
   }

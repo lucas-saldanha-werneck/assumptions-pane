@@ -209,6 +209,7 @@ type World = {
   sent: string[]
   contexts: string[][]
   logs: string[]
+  toasts: string[]
   stackRuns: number
   host: { present: boolean; command: boolean }
   clock: ReturnType<typeof mock.clock>
@@ -234,6 +235,10 @@ async function boot(
     storeGetFails?: number
     /** The first N store writes fail as if another session held the lock. */
     storeLockedFor?: number
+    /** The folder session.start reports (the shell's folder at a reload). */
+    cwd?: string
+    /** Session state already there (a reload of the module keeps it), by key. */
+    state?: Record<string, unknown>
   } = {},
 ): Promise<World> {
   const world: World = {
@@ -244,6 +249,7 @@ async function boot(
     sent: [],
     contexts: [],
     logs: [],
+    toasts: [],
     stackRuns: 0,
     host: { present: options.host ?? false, command: options.hostCommand ?? options.host ?? false },
     clock: mock.clock(on, { now: 1_000_000 }),
@@ -294,7 +300,24 @@ async function boot(
   on('session.end', (_$, e) => ({ sessionId: e.sessionId }) as never)
   on('tool.register', (_$, e) => ({ value: { tool: `mcp__assumptions-pane__${e.name}` } }))
   on('command.register', (_$, e) => ({ value: { command: e.name } }))
-  on('ui.toast', () => ({ value: undefined }))
+  on('ui.toast', (_$, e) => {
+    world.toasts.push(String((e as { text?: string }).text ?? ''))
+    return { value: undefined } as never
+  })
+  if (options.state !== undefined) {
+    const state: Record<string, { value: unknown; version: number }> = {}
+    for (const [k, v] of Object.entries(options.state)) state[`assumptions-pane.${k}`] = { value: v, version: 1 }
+    on('state.get', async (_$, e) => {
+      const a = e as { plugin: string; key: string }
+      return { value: state[`${a.plugin}.${a.key}`] ?? { value: undefined, version: 0 } } as never
+    })
+    on('state.set', async (_$, e) => {
+      const a = e as { plugin: string; key: string; value: unknown }
+      const version = (state[`${a.plugin}.${a.key}`]?.version ?? 0) + 1
+      state[`${a.plugin}.${a.key}`] = { value: a.value, version }
+      return { value: { isSet: true, version } } as never
+    })
+  }
   on('ui.log', (_$, e) => {
     world.logs.push(String((e as { text?: string }).text ?? ''))
     return { value: undefined } as never
@@ -318,7 +341,7 @@ async function boot(
     if (options.submit === 'drop') return { drop: 'blocked by a hook' } as never
     return { text: e.text }
   })
-  if (options.start !== false) await $.session.start({ cwd: '/tmp', surface: 'terminal', isInteractive: true })
+  if (options.start !== false) await $.session.start({ cwd: options.cwd ?? '/tmp', surface: 'terminal', isInteractive: true })
   return world
 }
 
@@ -1043,4 +1066,142 @@ test('a store held by another session for a moment is saved on a later try, with
   for (let i = 0; i < 20 && world.sets.length === 0; i++) await world.clock.advance(100)
   expect(savedAt(world).items.map(a => a.text)).toEqual(['Held lock'])
   expect(world.logs.filter(l => l.includes('could not be saved')).length).toBe(0)
+})
+
+// --- 0.5.2: answers that went nowhere, and items that vanished -------------------
+// Seen 19/11 in the JBEI folder: the main session and two subsessions (hidden
+// sessions in the same folder) shared one list. The pane showed the
+// subsession's assumptions, but Send counted only this session's own answers:
+// with only the subsession's answered there was no Send button, "mark all"
+// sent only some, and the rest left later, unseen, when the subsession sent
+// them with whatever message reached it next.
+
+const WATCH = 1500
+
+test("XR4 Send shows for another live session's answers and hands them to that session", async ($, on) => {
+  const world = await boot($, on, {
+    stored: {
+      'assumptions:/tmp': {
+        items: [one('A1', 'Theirs one', 'wrong', { owner: 'live' }), one('A2', 'Theirs two', 'right', { owner: 'live' })],
+        nextId: 3,
+        owners: { live: 1_000_000 },
+      },
+    },
+  })
+  const ui = await ownPane($, 'terminal')
+  expect(await ui.find({ key: 'send' })).toBeDefined()
+  expect((await ui.find({ key: 'send' }))?.text).toBe('Send 2 to Claude')
+  await ui.press({ key: 'send' })
+  // Not sent to this Claude: it did not make them.
+  expect(world.sent.join('\n')).not.toContain('Theirs one')
+  const saved = full(world).items as { id: string; sendAsked?: number }[]
+  expect(saved.every(a => typeof a.sendAsked === 'number')).toBe(true)
+  expect(await ui.find({ type: 'Text', text: /^  waiting for its session$/ })).toBeDefined()
+  expect(world.toasts.some(t => t.includes('other session in this folder'))).toBe(true)
+  await ui.unmount()
+})
+
+test('XR5 the session that logged them sends the answers another pane asked for', async ($, on) => {
+  const world = await boot($, on, {
+    state: { owner: 'me1' },
+    stored: {
+      'assumptions:/tmp': {
+        items: [one('A1', 'Mine', 'wrong', { owner: 'me1', sendAsked: 999_000, at: 999_000 })],
+        nextId: 2,
+        owners: { me1: 1_000_000 },
+      },
+    },
+  })
+  await world.clock.advance(WATCH)
+  await settle()
+  expect(world.sent.join('\n')).toContain('- A1 WRONG: Mine')
+  expect(full(world).items).toEqual([])
+})
+
+test('XR6 a reload of the module keeps the folder the session started in and its own items', async ($, on) => {
+  const mineA1 = one('A1', 'Before the reload', 'open', { owner: 'me1', at: 999_000 })
+  const world = await boot($, on, {
+    // The shell had moved to a subfolder (`cd`) when the plugin update reloaded the module.
+    cwd: '/tmp/sub',
+    state: { owner: 'me1', storeKey: 'assumptions:/tmp', items: [mineA1], nextId: 2 },
+    stored: { 'assumptions:/tmp': { items: [mineA1], nextId: 2, owners: { me1: 1_000_000 } } },
+  })
+  await logAssumption($, 'After the reload')
+  expect(world.kept['assumptions:/tmp/sub']).toBeUndefined()
+  expect(full(world).items.map(a => a.id)).toEqual(['A1', 'A2'])
+  const first = await ownPane($, 'terminal')
+  await first.press({ key: 'wrong-A1' })
+  await first.unmount()
+  // (Drawn again: this test's stand-in state does not redraw a mounted pane.)
+  const ui = await ownPane($, 'terminal')
+  // Still this session's own item: sent to this Claude, not handed to "another session".
+  expect(await ui.find({ type: 'Text', text: /^  other session$/ })).toBeUndefined()
+  await ui.press({ key: 'send' })
+  expect(world.sent.join('\n')).toContain('- A1 WRONG: Before the reload')
+  await ui.unmount()
+})
+
+test("XR7 another session's items show without an event here, and one it sent says where it went", async ($, on) => {
+  const world = await boot($, on)
+  const ui = await ownPane($, 'terminal')
+  world.kept['assumptions:/tmp'] = { items: [one('A1', 'From the subsession', 'open', { owner: 'live', at: 1_000_100 })], nextId: 2, owners: { live: 1_000_000 } }
+  await world.clock.advance(WATCH)
+  await settle()
+  expect(await ui.find({ type: 'Text', text: /A1 From the subsession/ })).toBeDefined()
+  await ui.press({ key: 'wrong-A1-live' })
+  // The subsession sent it with the next message it got.
+  world.kept['assumptions:/tmp'] = { ...full(world), items: [], removed: ['A1@live'] }
+  await world.clock.advance(WATCH)
+  await settle()
+  expect(await ui.find({ type: 'Text', text: /A1 From the subsession/ })).toBeUndefined()
+  expect(world.toasts.some(t => t.includes('A1 was sent to Claude from another session in this folder'))).toBe(true)
+  await ui.unmount()
+})
+
+test('XR8 an answer handed to a session that never sends it can be sent from here after a while', async ($, on) => {
+  // The other session runs an older version: it beats, but ignores the ask.
+  const world = await boot($, on, {
+    stored: { 'assumptions:/tmp': { items: [one('A1', 'Theirs', 'wrong', { owner: 'live' })], nextId: 2, owners: { live: 1_000_000 } } },
+  })
+  const ui = await ownPane($, 'terminal')
+  await ui.press({ key: 'send' })
+  expect(world.sent.join('\n')).not.toContain('A1 WRONG')
+  await world.clock.advance(16_000)
+  await ui.unmount()
+  const again = await ownPane($, 'terminal')
+  expect((await again.find({ key: 'send' }))?.text).toBe('Send 1 to Claude')
+  await again.press({ key: 'send' })
+  expect(world.sent.join('\n')).toContain('- A1 WRONG: Theirs')
+  await again.unmount()
+})
+
+test("XR9 the owner sends only the answers it was asked for, and a pane where nothing was answered says nothing", async ($, on) => {
+  const world = await boot($, on, {
+    state: { owner: 'me1' },
+    stored: {
+      'assumptions:/tmp': {
+        items: [
+          one('A1', 'Asked', 'wrong', { owner: 'me1', sendAsked: 999_000, at: 999_000 }),
+          one('A2', 'Answered here, not sent', 'right', { owner: 'me1', at: 999_000 }),
+          one('A3', 'Third session', 'wrong', { owner: 'third', at: 999_000 }),
+        ],
+        nextId: 4,
+        owners: { me1: 1_000_000, third: 1_000_000 },
+      },
+    },
+  })
+  await world.clock.advance(WATCH)
+  await settle()
+  const text = world.sent.join('\n')
+  expect(text).toContain('- A1 WRONG: Asked')
+  expect(text).not.toContain('A2')
+  expect(text).not.toContain('A3')
+  const left = full(world).items as { id: string; sendAsked?: number }[]
+  expect(left.map(a => a.id)).toEqual(['A2', 'A3'])
+  expect(left.every(a => a.sendAsked === undefined)).toBe(true)
+  // The third session sends A3 itself: nothing was answered in this pane, so no toast.
+  world.kept['assumptions:/tmp'] = { ...full(world), items: [left[0]], removed: [...(full(world).removed ?? []), 'A3@third'] }
+  await world.clock.advance(WATCH)
+  await settle()
+  expect(world.toasts.some(t => t.includes('A3'))).toBe(false)
 })

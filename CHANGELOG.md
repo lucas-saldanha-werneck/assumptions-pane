@@ -2,6 +2,12 @@
 
 Versions are the `version` in `.claude-plugin/plugin.json`. Newest first.
 
+## 0.5.2 (2026-11-19)
+
+- Send shows, and counts, answers to items another session in the same folder logged (a subsession counts): it hands them to that session, which sends them to its own Claude within a couple of seconds. Before, Send counted only this session's own answers, so with only the other session's items answered there was no Send button, and "mark all" sent only some.
+- The pane picks up what another session in the folder saved (its new items, the answers it sent) every 1.5 s, and says in a toast when answers given in this pane were sent from another session, instead of the rows leaving without a word. An answer handed over and not sent within 15 s (the other session runs an older version) can be sent from here.
+- A plugin update or other reload of the mod keeps the folder's list and the session's owner mark. Before, the reload read the shell's current folder (after a `cd` into a subfolder the list moved to that subfolder's key) and minted a new owner mark (the session's own items showed as "other session" for 3 minutes).
+
 ## 0.5.1 (2026-11-19)
 
 - The list shows open whenever it has items; a new assumption opens it again after a Hide.
