@@ -21,7 +21,7 @@ it does not guess silently either.
 
 Each time Claude picks something you did not state (a default value, a file name, one option over
 another), it logs it in one line and keeps working. This sketch shows roughly how the pane looks in
-a terminal after you press Show. It is not a screenshot:
+a terminal. It is not a screenshot:
 
 ```
 Assumptions · 2 open ────────── Hide
@@ -85,8 +85,8 @@ also loads in the desktop app's local Code sessions.
 
 ## Use
 
-- The pane opens by itself when Claude logs the first assumption. It starts collapsed: press Show
-  to see the list. In a terminal it only opens by itself when the window is at least 144 columns
+- The pane opens by itself when Claude logs the first assumption, with the list showing. Hide
+  folds it to one line; the next new assumption opens it again. In a terminal it only opens by itself when the window is at least 144 columns
   wide (110 if you have opened the pane before). Below that it waits.
 - `/assumptions` opens the pane at any width. `/assumptions clear` empties the list.
 - The list is saved per folder. A new session started in the same folder (for example after a
