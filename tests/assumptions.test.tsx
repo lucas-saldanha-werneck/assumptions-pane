@@ -1563,3 +1563,11 @@ test('PK5 "ok" on the phone marks the listed subsession items right in their own
   expect((world.kept[kidKey] as { items: { verdict: string }[] }).items[0]?.verdict).toBe('right')
   expect(savedAt(world).items.map(a => `${a.id} ${a.verdict}`)).toEqual(['A1 right'])
 })
+
+test('PK6 a reply naming a subsession item that was never listed changes nothing', async ($, on) => {
+  const world = await phoneWithKid($, on)
+  await phonePrompt($, 'jbei-mudar-valor A3 errado: nope')
+  const theirs = (world.kept[kidKey] as { items: { verdict: string; sendAsked?: number }[] }).items[0]
+  expect(theirs?.verdict).toBe('open')
+  expect(theirs?.sendAsked).toBeUndefined()
+})

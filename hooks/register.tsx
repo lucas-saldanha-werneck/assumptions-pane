@@ -959,7 +959,7 @@ async function planPhonePrompt($: EngineInterface, text: string): Promise<PhoneP
   const contexts: string[] = []
   const now = await nowMs($)
   // The subsessions' lists as they are now, not as of the last watch tick.
-  await pullKids($, true).catch(() => undefined)
+  await pullKids($).catch(() => undefined)
   const list = await read($, items)
   const kids = await read($, kidsAtom)
   const isListed = (u: string): boolean => phoneListed.includes(u)
@@ -968,7 +968,7 @@ async function planPhonePrompt($: EngineInterface, text: string): Promise<PhoneP
   const marks = parsePhoneReply(
     text,
     [...own.map(a => a.id), ...listedKids.map(kidLabel)],
-    [...new Set(kids.map(kidName))],
+    [...new Set(listedKids.map(kidName))],
   )
   const marked = new Map<string, Assumption>()
   const kidMarked = new Map<string, { item: Assumption; live: boolean }>()
@@ -976,9 +976,10 @@ async function planPhonePrompt($: EngineInterface, text: string): Promise<PhoneP
     const at = await stamp($)
     for (const m of marks) {
       const patch = { verdict: m.verdict, isSent: true, at, told: true, ...(m.why !== undefined ? { correction: m.why } : {}) }
-      const kid = kids.find(k => kidLabel(k) === m.id)
-      if (kid !== undefined) {
-        kidMarked.set(uid(kid), { item: { ...kid, ...patch }, live: kid.seen > now - ALIVE_MS })
+      // Only items that were listed and are still open; two subsessions with one label are both answered.
+      const sameLabel = listedKids.filter(k => kidLabel(k) === m.id)
+      if (sameLabel.length > 0) {
+        for (const kid of sameLabel) kidMarked.set(uid(kid), { item: { ...kid, ...patch }, live: kid.seen > now - ALIVE_MS })
         continue
       }
       const a = list.find(one => one.id === m.id && mine(one, now))
