@@ -920,6 +920,29 @@ test("AP-05 another live session's answer is not sent to this Claude; a closed s
   expect(full(world).items.map(a => a.id)).toEqual(['A1'])
 })
 
+test('AP-11 answers not sent yet wait for the person: a task notification or another session\'s message does not carry them', async ($, on) => {
+  // Seen in a session with background agents and a subsession (19/11): a
+  // notification entered mid-turn and took the answers the person was still writing.
+  const world = await boot($, on)
+  await logAssumption($, 'Only the reminder before the due date goes out again')
+  await logAssumption($, 'It applies to the monthly fee too')
+  const ui = await ownPane($, 'terminal')
+  await ui.press({ key: 'wrong-A1' })
+  await ui.press({ key: 'right-A2' })
+  for (const kind of ['task-notification', 'peer', 'peer-send-message', 'scheduled-trigger', 'unclassified', 'auto-continuation', 'coordinator']) {
+    await $.prompt.submit({ text: `<${kind}>`, origin: { kind } } as never)
+    expect(world.contexts.at(-1)?.join('\n') ?? '').not.toContain('Assumption review')
+  }
+  expect(await ui.find({ key: 'right-A1' })).toBeDefined()
+  expect(await ui.find({ key: 'send' })).toBeDefined()
+  // The person's own message still carries them, and they leave.
+  await $.prompt.submit(TYPED)
+  expect(world.contexts.at(-1)?.join('\n')).toContain('A1 WRONG: Only the reminder')
+  expect(world.contexts.at(-1)?.join('\n')).toContain('A2 RIGHT')
+  expect(await ui.find({ key: 'right-A1' })).toBeUndefined()
+  await ui.unmount()
+})
+
 test('AP-06 an id trimmed from the removed list still cannot come back', async ($, on) => {
   const removed = Array.from({ length: 300 }, (_, i) => `A${i + 1}`)
   const world = await boot($, on, {
@@ -1570,4 +1593,18 @@ test('PK6 a reply naming a subsession item that was never listed changes nothing
   const theirs = (world.kept[kidKey] as { items: { verdict: string; sendAsked?: number }[] }).items[0]
   expect(theirs?.verdict).toBe('open')
   expect(theirs?.sendAsked).toBeUndefined()
+})
+
+test('AP-12 a subsession does not send, with the main session\'s message, the answer its pane got before Send', async ($, on) => {
+  const world = await boot($, on, {
+    cwd: '/work/jbei',
+    env: { CLAUDE_PID: '82281', CLAUDE_SUB_PARENT: '15790', CLAUDE_SUB_NAME: 'jbei-mudar-valor' },
+    state: { owner: 'kid1' },
+    stored: { [kidKey]: { items: [kidItem('A1', 'Use the 2025 price table', 'wrong', { at: 1_000_200 })], nextId: 2, owners: { kid1: 1_000_000 } } },
+  })
+  await world.clock.advance(WATCH)
+  await settle()
+  await $.prompt.submit({ text: 'Merged when CI is green. You can stop.', origin: { kind: 'peer' } } as never)
+  expect(world.contexts.at(-1)?.join('\n') ?? '').not.toContain('Use the 2025 price table')
+  expect((world.kept[kidKey] as { items: unknown[] }).items).toHaveLength(1)
 })
