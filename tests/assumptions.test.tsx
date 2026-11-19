@@ -929,7 +929,7 @@ test('AP-11 answers not sent yet wait for the person: a task notification or ano
   const ui = await ownPane($, 'terminal')
   await ui.press({ key: 'wrong-A1' })
   await ui.press({ key: 'right-A2' })
-  const kinds = ['task-notification', 'peer', 'peer-send-message', 'scheduled-trigger', 'unclassified', 'auto-continuation', 'coordinator', 'projects-relay', 'observer', undefined]
+  const kinds = ['task-notification', 'peer', 'peer-send-message', 'scheduled-trigger', 'unclassified', 'auto-continuation', 'coordinator', 'projects-relay', 'observer', 'slack-ping', 'channel', undefined]
   for (const kind of kinds) {
     const before = world.contexts.length
     await $.prompt.submit({ text: `<${kind ?? 'no origin'}>`, ...(kind === undefined ? {} : { origin: { kind } }) } as never)
@@ -1612,7 +1612,7 @@ test('AP-12 a subsession does not send, with the main session\'s message, the an
   expect((world.kept[kidKey] as { items: unknown[] }).items).toHaveLength(1)
 })
 
-for (const kind of ['sdk', 'bridge', 'slack-ping'] as const) {
+for (const kind of ['sdk', 'bridge'] as const) {
   test(`AP-13 a prompt the person sent from ${kind} carries the answers`, async ($, on) => {
     const world = await boot($, on)
     await logAssumption($, 'Use port 8080')

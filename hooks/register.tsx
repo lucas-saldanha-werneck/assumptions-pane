@@ -816,10 +816,11 @@ const reviewLine = (a: Assumption): string => {
 }
 
 // Prompts the person sent: typed in the terminal (composer), in the desktop app
-// (sdk), on the phone (bridge), or from Slack (slack-ping). A prompt with no
+// (sdk: the app is an SDK host), or on the phone (bridge), as the engine's own
+// person check counts them (a Slack ping or a channel message is not). A prompt with no
 // origin is not counted as the person's: the engine stamps every prompt, and a
 // hook beneath that dropped it must not let a notification take the answers.
-const PERSON_ORIGINS: readonly PromptOrigin['kind'][] = ['composer', 'sdk', 'bridge', 'slack-ping']
+const PERSON_ORIGINS: readonly PromptOrigin['kind'][] = ['composer', 'sdk', 'bridge']
 const fromPerson = (kind: string | undefined): boolean =>
   kind !== undefined && (PERSON_ORIGINS as readonly string[]).includes(kind)
 
