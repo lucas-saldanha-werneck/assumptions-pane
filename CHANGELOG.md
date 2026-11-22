@@ -2,6 +2,10 @@
 
 Versions are the `version` in `.claude-plugin/plugin.json`. Newest first.
 
+## 0.6.3 (2026-11-22)
+
+- No change to the plugin itself. The test run no longer fails now and then with "a rejection nothing handled: $.state.get refused": two tests start a Send whose submit never settles and left that press unhandled, so when the test world went away the press ended in a refused read. The press now expects that.
+
 ## 0.6.2 (2026-11-19)
 
 - Answers marked and not sent yet stay in the pane until you press Send or send a prompt yourself (typed in the terminal or the desktop app, or on the phone). Before, any prompt took them along, also a background task's notification, a subsession's message or the main session's message to a subsession, which can arrive mid-turn: the answers left the pane while they were still being given.

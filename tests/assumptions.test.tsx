@@ -463,7 +463,8 @@ for (const surface of SURFACES) {
     const ui = await ownPane($, surface)
     await ui.press({ key: 'wrong-A59' })
     await ui.press({ key: 'right-A60' })
-    void ui.press({ key: 'send' })
+    // The submit hangs, so this press ends only when the test world goes: the refusal then is expected.
+    void ui.press({ key: 'send' }).catch(() => undefined)
     for (let i = 0; i < 400 && world.sent.length === 0; i++) await Promise.resolve()
     expect(world.sent.at(-1)).toContain('A59 WRONG')
     // A60 changed while the review waited: its new answer must stay to send again.
@@ -482,7 +483,8 @@ for (const surface of SURFACES) {
     const ui = await ownPane($, surface)
     expect(await ui.find({ type: 'Text', text: /A1 Use port 8080 and host 0\.0\.0\.0/ })).toBeDefined()
     await ui.press({ key: 'wrong-A1' })
-    void ui.press({ key: 'send' })
+    // The submit hangs, so this press ends only when the test world goes: the refusal then is expected.
+    void ui.press({ key: 'send' }).catch(() => undefined)
     for (let i = 0; i < 400 && world.sent.length === 0; i++) await Promise.resolve()
     await $.turn.start({ turnId: 't2', text: world.sent.at(-1) as string })
     expect(await ui.find({ type: 'Text', text: /A1 Use port/ })).toBeUndefined()
