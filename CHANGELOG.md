@@ -2,6 +2,9 @@
 
 Versions are the `version` in `.claude-plugin/plugin.json`. Newest first.
 
+## 0.6.4 (2026-11-22)
+- Fix: when side-stack loads late, the own pane no longer stays open as a separate tab. The host is looked for again at 5 s, 15 s and 60 s (stack-guest.tsx, byte-identical copy of side-stack 0.5.2); if the own pane renders while stacked it now closes itself.
+
 ## 0.6.3 (2026-11-22)
 
 - No change to the plugin itself. The test run no longer fails now and then with "a rejection nothing handled: $.state.get refused": two tests start a Send whose submit never settles and left that press unhandled, so when the test world went away the press ended in a refused read. The press now expects that.
