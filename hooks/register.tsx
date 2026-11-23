@@ -690,7 +690,7 @@ const redraw = async ($: EngineInterface): Promise<void> => {
   }
 }
 
-// At session start, and again 0.1 s and 1.1 s later (plugin load order is not
+// At session start, and again 0.1 s, 1.1 s, 5 s, 15 s and 60 s later (plugin load order is not
 // known, so side-stack may start after this plugin): pick the pane to use.
 const settlePane = async ($: EngineInterface): Promise<void> => {
   if (await checkStack($)) await closeOwnPane($)
@@ -1443,7 +1443,13 @@ export const register: Register = (on, options) => {
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const now = await drawingState($)
     if (now.isStacked) {
-      // Never the list twice with live buttons.
+      // Never the list twice with live buttons. Opened before side-stack loaded:
+      // a render may not write state or close, so close the stray pane from a timer.
+      try {
+        $.clock.after(0, () => void closeOwnPane($).catch(() => undefined))
+      } catch {
+        // No clock: the next check closes it.
+      }
       const { Text } = $.ui.resolve(e)
       return <Text dimColor>{STACKED_LINE}</Text>
     }
